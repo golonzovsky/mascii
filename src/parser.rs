@@ -1,4 +1,30 @@
-use crate::graph::{Graph, NodeId, Shape};
+use crate::graph::{EdgeStyle, Graph, NodeId, Shape};
+
+const EDGE_OPS: &[(&str, EdgeStyle)] = &[
+    ("-.->", EdgeStyle::Dotted),
+    ("==>", EdgeStyle::Thick),
+    ("-->", EdgeStyle::Normal),
+    ("~~~", EdgeStyle::Invisible),
+];
+
+fn find_edge_op(s: &str, from: usize) -> Option<(usize, usize, EdgeStyle)> {
+    let mut best: Option<(usize, usize, EdgeStyle)> = None;
+    for &(op, style) in EDGE_OPS {
+        if let Some(pos) = s[from..].find(op) {
+            let start = from + pos;
+            let end = start + op.len();
+            match best {
+                Some((bs, _, _)) if bs <= start => {}
+                _ => best = Some((start, end, style)),
+            }
+        }
+    }
+    best
+}
+
+fn line_has_edge_op(s: &str) -> bool {
+    find_edge_op(s, 0).is_some()
+}
 
 pub fn parse(source: &str) -> Result<Graph, String> {
     let mut g = Graph::new();
@@ -14,7 +40,7 @@ pub fn parse(source: &str) -> Result<Graph, String> {
             continue;
         }
 
-        if line.contains("-->") {
+        if line_has_edge_op(line) {
             parse_edge_line(&mut g, line)
                 .map_err(|e| format!("line {}: {}", lineno + 1, e))?;
         } else {
@@ -34,16 +60,32 @@ fn parse_node_decl(g: &mut Graph, line: &str) -> Result<NodeId, String> {
 }
 
 fn parse_edge_line(g: &mut Graph, line: &str) -> Result<(), String> {
-    let parts: Vec<&str> = line.split("-->").collect();
-    if parts.len() < 2 {
+    // Walk the line, splitting at any edge operator. Record both the node
+    // segments and the style of the operator that separates each pair.
+    let mut segments: Vec<&str> = Vec::new();
+    let mut styles: Vec<EdgeStyle> = Vec::new();
+    let mut cursor = 0;
+    loop {
+        match find_edge_op(line, cursor) {
+            Some((start, end, style)) => {
+                segments.push(&line[cursor..start]);
+                styles.push(style);
+                cursor = end;
+            }
+            None => {
+                segments.push(&line[cursor..]);
+                break;
+            }
+        }
+    }
+    if segments.len() < 2 {
         return Err(format!("bad edge: {}", line));
     }
+
     let mut prev_id: Option<NodeId> = None;
-    for (idx, p) in parts.iter().enumerate() {
-        let mut p = p.trim();
-        // A Mermaid edge label `|text|` attaches to the preceding edge and
-        // appears as a prefix on the TARGET endpoint text after splitting on
-        // `-->`.
+    for (idx, raw) in segments.iter().enumerate() {
+        let mut p = raw.trim();
+        // Edge label `|text|` prefixes the target of the previous edge.
         let mut edge_label: Option<String> = None;
         if idx > 0 && p.starts_with('|') {
             if let Some(end) = p[1..].find('|') {
@@ -60,7 +102,8 @@ fn parse_edge_line(g: &mut Graph, line: &str) -> Result<(), String> {
         let (name, label, shape) = parse_ident_label(p)?;
         let id = g.add_node(&name, &label, shape);
         if let Some(pi) = prev_id {
-            g.add_edge(pi, id, edge_label);
+            let style = styles[idx - 1];
+            g.add_edge(pi, id, edge_label, style);
         }
         prev_id = Some(id);
     }

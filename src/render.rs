@@ -1,4 +1,4 @@
-use crate::graph::{Graph, NodeId, Shape};
+use crate::graph::{EdgeStyle, Graph, NodeId, Shape};
 use std::collections::HashMap;
 
 const RESET: &str = "\x1b[0m";
@@ -102,6 +102,60 @@ impl Theme {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct GlyphSet {
+    vert: char,
+    horiz: char,
+    corner_dl: char, // ╰ (comes from up, goes right)
+    corner_dr: char, // ╯ (comes from up, goes left)
+    corner_ur: char, // ╭ (comes from right, goes down)
+    corner_ul: char, // ╮ (comes from left, goes down)
+    tap_up: char,    // ┴
+    tap_down: char,  // ┬
+}
+
+const GLYPH_NORMAL: GlyphSet = GlyphSet {
+    vert: '│',
+    horiz: '─',
+    corner_dl: '╰',
+    corner_dr: '╯',
+    corner_ur: '╭',
+    corner_ul: '╮',
+    tap_up: '┴',
+    tap_down: '┬',
+};
+
+const GLYPH_THICK: GlyphSet = GlyphSet {
+    vert: '┃',
+    horiz: '━',
+    corner_dl: '┗',
+    corner_dr: '┛',
+    corner_ur: '┏',
+    corner_ul: '┓',
+    tap_up: '┻',
+    tap_down: '┳',
+};
+
+const GLYPH_DOTTED: GlyphSet = GlyphSet {
+    vert: '┊',
+    horiz: '┄',
+    corner_dl: '╰',
+    corner_dr: '╯',
+    corner_ur: '╭',
+    corner_ul: '╮',
+    tap_up: '┴',
+    tap_down: '┬',
+};
+
+fn glyphs_for(style: EdgeStyle) -> GlyphSet {
+    match style {
+        EdgeStyle::Normal => GLYPH_NORMAL,
+        EdgeStyle::Thick => GLYPH_THICK,
+        EdgeStyle::Dotted => GLYPH_DOTTED,
+        EdgeStyle::Invisible => GLYPH_NORMAL,
+    }
+}
+
 struct Canvas {
     chars: Vec<Vec<char>>,
     kinds: Vec<Vec<CellKind>>,
@@ -169,12 +223,25 @@ pub fn render(g: &Graph, theme: &Theme) -> String {
         draw_box(&mut canvas, n.x, n.y, n.width, n.height, &n.label_lines, n.shape);
     }
 
-    // Dummies (vertical pass-throughs)
+    // Dummies (vertical pass-throughs) — use the style of the edge that
+    // enters the dummy, falling back to Normal. Invisible dummies render
+    // as blank columns.
     for n in &g.nodes {
-        if n.is_dummy {
-            for dy in 0..n.height {
-                canvas.set(n.x, n.y + dy, '│', CellKind::Edge);
-            }
+        if !n.is_dummy {
+            continue;
+        }
+        let incoming_style = g
+            .edges
+            .iter()
+            .find(|e| e.to == n.id)
+            .map(|e| e.style)
+            .unwrap_or(EdgeStyle::Normal);
+        if incoming_style == EdgeStyle::Invisible {
+            continue;
+        }
+        let gl = glyphs_for(incoming_style);
+        for dy in 0..n.height {
+            canvas.set(n.x, n.y + dy, gl.vert, CellKind::Edge);
         }
     }
 
@@ -191,13 +258,30 @@ pub fn render(g: &Graph, theme: &Theme) -> String {
     for tid in targets {
         let edges = &by_target[&tid];
         let target = &g.nodes[tid];
-        if edges.len() == 1 || target.is_dummy {
-            for &i in edges {
+        // Invisible edges contribute only to layout; skip rendering.
+        let visible: Vec<usize> = edges
+            .iter()
+            .copied()
+            .filter(|&i| g.edges[i].style != EdgeStyle::Invisible)
+            .collect();
+        if visible.is_empty() {
+            continue;
+        }
+        if visible.len() == 1 || target.is_dummy {
+            for i in visible {
                 let (sx, sy, dx, dy) = endpoints[&i];
-                draw_edge(&mut canvas, sx, sy, dx, dy, target.is_dummy);
+                draw_edge(
+                    &mut canvas,
+                    sx,
+                    sy,
+                    dx,
+                    dy,
+                    target.is_dummy,
+                    g.edges[i].style,
+                );
             }
         } else {
-            draw_merge(&mut canvas, g, tid, edges);
+            draw_merge(&mut canvas, g, tid, &visible);
         }
     }
 
@@ -459,6 +543,20 @@ fn draw_merge(canvas: &mut Canvas, g: &Graph, target_id: NodeId, edge_ids: &[usi
     let dx = dst.x + dst.width / 2;
     let dy = dst.y;
 
+    // Pick glyphs: if any contributing edge is thick, render the whole merge
+    // thick; otherwise dotted if any is dotted; otherwise normal.
+    let style = if edge_ids.iter().any(|&i| g.edges[i].style == EdgeStyle::Thick) {
+        EdgeStyle::Thick
+    } else if edge_ids
+        .iter()
+        .any(|&i| g.edges[i].style == EdgeStyle::Dotted)
+    {
+        EdgeStyle::Dotted
+    } else {
+        EdgeStyle::Normal
+    };
+    let gl = glyphs_for(style);
+
     let mut srcs: Vec<(usize, usize)> = edge_ids
         .iter()
         .map(|&ei| {
@@ -478,7 +576,7 @@ fn draw_merge(canvas: &mut Canvas, g: &Graph, target_id: NodeId, edge_ids: &[usi
 
     for &(sx, sy) in &srcs {
         for y in sy..mid_y {
-            canvas.set_overlay(sx, y, '│', CellKind::Edge);
+            canvas.set_overlay(sx, y, gl.vert, CellKind::Edge);
         }
     }
 
@@ -488,26 +586,26 @@ fn draw_merge(canvas: &mut Canvas, g: &Graph, target_id: NodeId, edge_ids: &[usi
     let bar_hi = rightmost_src.max(dx);
 
     for x in bar_lo..=bar_hi {
-        canvas.set_overlay(x, mid_y, '─', CellKind::Edge);
+        canvas.set_overlay(x, mid_y, gl.horiz, CellKind::Edge);
     }
 
     for &(sx, _) in &srcs {
         let ch = if sx == bar_lo {
-            '╰'
+            gl.corner_dl
         } else if sx == bar_hi {
-            '╯'
+            gl.corner_dr
         } else {
-            '┴'
+            gl.tap_up
         };
         canvas.set(sx, mid_y, ch, CellKind::Edge);
     }
 
     let target_ch = if dx == bar_lo && dx != leftmost_src {
-        Some('╭')
+        Some(gl.corner_ur)
     } else if dx == bar_hi && dx != rightmost_src {
-        Some('╮')
+        Some(gl.corner_ul)
     } else if dx >= bar_lo && dx <= bar_hi && srcs.iter().all(|&(sx, _)| sx != dx) {
-        Some('┬')
+        Some(gl.tap_down)
     } else {
         None
     };
@@ -516,7 +614,7 @@ fn draw_merge(canvas: &mut Canvas, g: &Graph, target_id: NodeId, edge_ids: &[usi
     }
 
     for y in (mid_y + 1)..dy {
-        canvas.set_overlay(dx, y, '│', CellKind::Edge);
+        canvas.set_overlay(dx, y, gl.vert, CellKind::Edge);
     }
     if dy > mid_y + 1 {
         canvas.set(dx, dy - 1, '▼', CellKind::Arrow);
@@ -532,13 +630,15 @@ fn draw_edge(
     dx: usize,
     dy: usize,
     dst_is_dummy: bool,
+    style: EdgeStyle,
 ) {
     if dy <= sy {
         return;
     }
+    let gl = glyphs_for(style);
     if sx == dx {
         for y in sy..dy {
-            canvas.set_overlay(sx, y, '│', CellKind::Edge);
+            canvas.set_overlay(sx, y, gl.vert, CellKind::Edge);
         }
         if !dst_is_dummy {
             canvas.set(sx, dy - 1, '▼', CellKind::Arrow);
@@ -547,21 +647,21 @@ fn draw_edge(
     }
     let mid_y = (sy + dy) / 2;
     for y in sy..mid_y {
-        canvas.set_overlay(sx, y, '│', CellKind::Edge);
+        canvas.set_overlay(sx, y, gl.vert, CellKind::Edge);
     }
     let (lo, hi) = if sx < dx { (sx, dx) } else { (dx, sx) };
     for x in (lo + 1)..hi {
-        canvas.set_overlay(x, mid_y, '─', CellKind::Edge);
+        canvas.set_overlay(x, mid_y, gl.horiz, CellKind::Edge);
     }
     if sx < dx {
-        canvas.set(sx, mid_y, '╰', CellKind::Edge);
-        canvas.set(dx, mid_y, '╮', CellKind::Edge);
+        canvas.set(sx, mid_y, gl.corner_dl, CellKind::Edge);
+        canvas.set(dx, mid_y, gl.corner_ul, CellKind::Edge);
     } else {
-        canvas.set(sx, mid_y, '╯', CellKind::Edge);
-        canvas.set(dx, mid_y, '╭', CellKind::Edge);
+        canvas.set(sx, mid_y, gl.corner_dr, CellKind::Edge);
+        canvas.set(dx, mid_y, gl.corner_ur, CellKind::Edge);
     }
     for y in (mid_y + 1)..dy {
-        canvas.set_overlay(dx, y, '│', CellKind::Edge);
+        canvas.set_overlay(dx, y, gl.vert, CellKind::Edge);
     }
     if !dst_is_dummy && dy > mid_y + 1 {
         canvas.set(dx, dy - 1, '▼', CellKind::Arrow);

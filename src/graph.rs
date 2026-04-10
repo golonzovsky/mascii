@@ -29,11 +29,26 @@ pub struct Node {
     pub y: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeStyle {
+    Normal,    // -->
+    Thick,     // ==>
+    Dotted,    // -.->
+    Invisible, // ~~~
+}
+
+impl Default for EdgeStyle {
+    fn default() -> Self {
+        EdgeStyle::Normal
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Edge {
     pub from: NodeId,
     pub to: NodeId,
     pub label: Option<String>,
+    pub style: EdgeStyle,
 }
 
 #[derive(Debug, Default)]
@@ -84,7 +99,18 @@ impl Graph {
         id
     }
 
-    pub fn add_edge(&mut self, from: NodeId, to: NodeId, label: Option<String>) {
-        self.edges.push(Edge { from, to, label });
+    pub fn add_edge(
+        &mut self,
+        from: NodeId,
+        to: NodeId,
+        label: Option<String>,
+        style: EdgeStyle,
+    ) {
+        self.edges.push(Edge {
+            from,
+            to,
+            label,
+            style,
+        });
     }
 }

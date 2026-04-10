@@ -93,6 +93,7 @@ fn insert_dummies(g: &mut Graph) {
                 from: prev,
                 to: id,
                 label: label.take(),
+                style: e.style,
             });
             prev = id;
         }
@@ -100,6 +101,7 @@ fn insert_dummies(g: &mut Graph) {
             from: prev,
             to: e.to,
             label: None,
+            style: e.style,
         });
     }
 }
