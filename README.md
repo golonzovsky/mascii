@@ -12,35 +12,35 @@ flowchart TD
     B --> C{Let me think}
     C -->|One| D[Laptop]
     C -->|Two| E[iPhone]
-    C -->|Three| F[fa:fa-car Car]
+    C -->|Three| F[Car]
 ```
 
 `mascii` produces:
 
 ```
-              ┌───────────┐
-              │ Christmas │
-              └───────────┘
-                    │
-                Get money
-                    │
-                    ▼
-             ╭─────────────╮
-             │ Go shopping │
-             ╰─────────────╯
-                    │
-                    │
-                    ▼
-            ╭──────────────╮
-            │ Let me think │
-            ╰──────────────╯
-             │    │       │
-            One  Two    Three
-        ╭────╯    │       ╰──╮
+            ┌───────────┐
+            │ Christmas │
+            └───────────┘
+                  │
+              Get money
+                  │
+                  ▼
+           ╭─────────────╮
+           │ Go shopping │
+           ╰─────────────╯
+                  │
+                  │
+                  ▼
+          ╭──────────────╮
+          │ Let me think │
+          ╰──────────────╯
+           │      │     │
+          One    Two  Three
+        ╭──╯      │     ╰────╮
         ▼         ▼          ▼
-┌────────┐    ┌────────┐    ┌───────────────┐
-│ Laptop │    │ iPhone │    │ fa:fa-car Car │
-└────────┘    └────────┘    └───────────────┘
+┌────────┐    ┌────────┐    ┌─────┐
+│ Laptop │    │ iPhone │    │ Car │
+└────────┘    └────────┘    └─────┘
 ```
 
 Square brackets `[...]` render with sharp corners; round `(...)` and diamond `{...}` get rounded corners.
