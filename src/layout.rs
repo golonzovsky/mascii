@@ -432,8 +432,7 @@ fn assign_y(g: &mut Graph) {
                     n.y = y;
                     n.height = lh;
                 } else {
-                    let offset = (lh - n.height) / 2;
-                    n.y = y + offset;
+                    n.y = y;
                 }
             }
         }
