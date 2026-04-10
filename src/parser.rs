@@ -1,4 +1,4 @@
-use crate::graph::{Graph, NodeId};
+use crate::graph::{Graph, NodeId, Shape};
 
 pub fn parse(source: &str) -> Result<Graph, String> {
     let mut g = Graph::new();
@@ -29,8 +29,8 @@ pub fn parse(source: &str) -> Result<Graph, String> {
 }
 
 fn parse_node_decl(g: &mut Graph, line: &str) -> Result<NodeId, String> {
-    let (name, label) = parse_ident_label(line)?;
-    Ok(g.add_node(&name, &label))
+    let (name, label, shape) = parse_ident_label(line)?;
+    Ok(g.add_node(&name, &label, shape))
 }
 
 fn parse_edge_line(g: &mut Graph, line: &str) -> Result<(), String> {
@@ -43,43 +43,47 @@ fn parse_edge_line(g: &mut Graph, line: &str) -> Result<(), String> {
         let mut p = p.trim();
         // A Mermaid edge label `|text|` attaches to the preceding edge and
         // appears as a prefix on the TARGET endpoint text after splitting on
-        // `-->`. Strip it (we don't yet render edge labels).
+        // `-->`.
+        let mut edge_label: Option<String> = None;
         if idx > 0 && p.starts_with('|') {
             if let Some(end) = p[1..].find('|') {
+                let lbl = p[1..1 + end].trim().to_string();
+                if !lbl.is_empty() {
+                    edge_label = Some(lbl);
+                }
                 p = p[end + 2..].trim();
             }
         }
         if p.is_empty() {
             return Err(format!("empty endpoint in edge: {}", line));
         }
-        let (name, label) = parse_ident_label(p)?;
-        let id = g.add_node(&name, &label);
+        let (name, label, shape) = parse_ident_label(p)?;
+        let id = g.add_node(&name, &label, shape);
         if let Some(pi) = prev_id {
-            g.add_edge(pi, id);
+            g.add_edge(pi, id, edge_label);
         }
         prev_id = Some(id);
     }
     Ok(())
 }
 
-// Mermaid node shape brackets. All render as rectangles in v1.
-const SHAPE_BRACKETS: &[(char, char)] = &[
-    ('[', ']'), // square
-    ('(', ')'), // round
-    ('{', '}'), // diamond
+// Mermaid node shape brackets → (open, close, Shape).
+// Diamond `{...}` still renders Round per request.
+const SHAPE_BRACKETS: &[(char, char, Shape)] = &[
+    ('[', ']', Shape::Square),
+    ('(', ')', Shape::Round),
+    ('{', '}', Shape::Round),
 ];
 
-fn parse_ident_label(s: &str) -> Result<(String, String), String> {
+fn parse_ident_label(s: &str) -> Result<(String, String, Shape), String> {
     let s = s.trim();
-    // Find the first occurrence of any opening shape bracket.
     let first_open = s
         .char_indices()
-        .find(|(_, c)| SHAPE_BRACKETS.iter().any(|(o, _)| *o == *c));
+        .find(|(_, c)| SHAPE_BRACKETS.iter().any(|(o, _, _)| *o == *c));
     if let Some((i, open)) = first_open {
-        let close = SHAPE_BRACKETS
+        let (_, close, shape) = *SHAPE_BRACKETS
             .iter()
-            .find(|(o, _)| *o == open)
-            .map(|(_, c)| *c)
+            .find(|(o, _, _)| *o == open)
             .unwrap();
         let name = s[..i].trim().to_string();
         if name.is_empty() {
@@ -93,11 +97,11 @@ fn parse_ident_label(s: &str) -> Result<(String, String), String> {
         if label.len() >= 2 && label.starts_with('"') && label.ends_with('"') {
             label = &label[1..label.len() - 1];
         }
-        Ok((name, label.to_string()))
+        Ok((name, label.to_string(), shape))
     } else {
         if s.is_empty() {
             return Err("empty identifier".to_string());
         }
-        Ok((s.to_string(), String::new()))
+        Ok((s.to_string(), String::new(), Shape::Round))
     }
 }

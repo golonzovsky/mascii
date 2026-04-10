@@ -2,12 +2,25 @@ use std::collections::HashMap;
 
 pub type NodeId = usize;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shape {
+    Round,  // (...) and {...} and bare identifiers
+    Square, // [...]
+}
+
+impl Default for Shape {
+    fn default() -> Self {
+        Shape::Round
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Node {
     pub id: NodeId,
     pub name: String,
     pub label_lines: Vec<String>,
     pub is_dummy: bool,
+    pub shape: Shape,
     pub width: usize,
     pub height: usize,
     pub layer: usize,
@@ -20,6 +33,7 @@ pub struct Node {
 pub struct Edge {
     pub from: NodeId,
     pub to: NodeId,
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -34,13 +48,16 @@ impl Graph {
         Self::default()
     }
 
-    pub fn add_node(&mut self, name: &str, label: &str) -> NodeId {
+    pub fn add_node(&mut self, name: &str, label: &str, shape: Shape) -> NodeId {
         if let Some(&id) = self.name_to_id.get(name) {
-            if !label.is_empty() {
-                let n = &mut self.nodes[id];
-                if n.label_lines.len() == 1 && n.label_lines[0] == n.name {
-                    n.label_lines = vec![label.to_string()];
-                }
+            let n = &mut self.nodes[id];
+            if !label.is_empty()
+                && n.label_lines.len() == 1
+                && n.label_lines[0] == n.name
+            {
+                n.label_lines = vec![label.to_string()];
+                // A named shape declaration wins over the default Round.
+                n.shape = shape;
             }
             return id;
         }
@@ -55,6 +72,7 @@ impl Graph {
             name: name.to_string(),
             label_lines,
             is_dummy: false,
+            shape,
             width: 0,
             height: 0,
             layer: 0,
@@ -66,7 +84,7 @@ impl Graph {
         id
     }
 
-    pub fn add_edge(&mut self, from: NodeId, to: NodeId) {
-        self.edges.push(Edge { from, to });
+    pub fn add_edge(&mut self, from: NodeId, to: NodeId, label: Option<String>) {
+        self.edges.push(Edge { from, to, label });
     }
 }

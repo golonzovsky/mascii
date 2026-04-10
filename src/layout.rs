@@ -1,4 +1,4 @@
-use crate::graph::{Edge, Graph, Node, NodeId};
+use crate::graph::{Edge, Graph, Node, NodeId, Shape};
 
 const GAP: usize = 4;
 const CHANNEL: usize = 3;
@@ -70,7 +70,10 @@ fn insert_dummies(g: &mut Graph) {
             g.edges.push(e);
             continue;
         }
+        // Split long edge into chain. Keep the label on the FIRST hop only,
+        // so it renders in the channel directly below the source.
         let mut prev = e.from;
+        let mut label = e.label.clone();
         for l in (from_layer + 1)..to_layer {
             let id = g.nodes.len();
             g.nodes.push(Node {
@@ -78,6 +81,7 @@ fn insert_dummies(g: &mut Graph) {
                 name: format!("__dummy_{}", id),
                 label_lines: vec![],
                 is_dummy: true,
+                shape: Shape::Round,
                 width: 1,
                 height: 1,
                 layer: l,
@@ -85,10 +89,18 @@ fn insert_dummies(g: &mut Graph) {
                 x: 0,
                 y: 0,
             });
-            g.edges.push(Edge { from: prev, to: id });
+            g.edges.push(Edge {
+                from: prev,
+                to: id,
+                label: label.take(),
+            });
             prev = id;
         }
-        g.edges.push(Edge { from: prev, to: e.to });
+        g.edges.push(Edge {
+            from: prev,
+            to: e.to,
+            label: None,
+        });
     }
 }
 
@@ -363,6 +375,18 @@ fn assign_y(g: &mut Graph) {
         }
     }
 
+    // Compute channel heights: add a row when any edge leaving this layer
+    // carries a label, so the label has its own row in the channel.
+    let mut channel_heights: Vec<usize> = vec![CHANNEL; max_layer];
+    for e in &g.edges {
+        if e.label.is_some() {
+            let l = g.nodes[e.from].layer;
+            if l < max_layer {
+                channel_heights[l] = channel_heights[l].max(CHANNEL + 1);
+            }
+        }
+    }
+
     let mut y = 0usize;
     for l in 0..=max_layer {
         let lh = layer_heights[l];
@@ -379,7 +403,7 @@ fn assign_y(g: &mut Graph) {
         }
         y += lh;
         if l < max_layer {
-            y += CHANNEL;
+            y += channel_heights[l];
         }
     }
 }

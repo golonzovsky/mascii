@@ -1,4 +1,4 @@
-use crate::graph::{Graph, NodeId};
+use crate::graph::{Graph, NodeId, Shape};
 use std::collections::HashMap;
 
 const RESET: &str = "\x1b[0m";
@@ -166,7 +166,7 @@ pub fn render(g: &Graph, theme: &Theme) -> String {
         if n.is_dummy {
             continue;
         }
-        draw_box(&mut canvas, n.x, n.y, n.width, n.height, &n.label_lines);
+        draw_box(&mut canvas, n.x, n.y, n.width, n.height, &n.label_lines, n.shape);
     }
 
     // Dummies (vertical pass-throughs)
@@ -201,7 +201,45 @@ pub fn render(g: &Graph, theme: &Theme) -> String {
         }
     }
 
+    // Edge labels — placed beside the exit column in the channel below source.
+    for (i, e) in g.edges.iter().enumerate() {
+        let Some(text) = e.label.as_deref() else { continue };
+        if text.is_empty() {
+            continue;
+        }
+        let (sx, sy, _dx, _dy) = endpoints[&i];
+        place_edge_label(&mut canvas, sx, sy, text);
+    }
+
     emit(&canvas, theme)
+}
+
+fn place_edge_label(canvas: &mut Canvas, sx: usize, sy: usize, text: &str) {
+    // Inline placement: center label on the edge column, breaking the `│`
+    // drop at that row. Only write over space or `│` cells, so we don't
+    // clobber a neighbour's line art.
+    let row = sy + 1;
+    if row >= canvas.chars.len() {
+        return;
+    }
+    let len = text.chars().count();
+    if len == 0 {
+        return;
+    }
+    let start = sx.saturating_sub(len / 2);
+    let width = canvas.chars[row].len();
+    if start + len > width {
+        return;
+    }
+    for k in 0..len {
+        let c = canvas.chars[row][start + k];
+        if c != ' ' && c != '│' {
+            return;
+        }
+    }
+    for (k, ch) in text.chars().enumerate() {
+        canvas.set(start + k, row, ch, CellKind::Label);
+    }
 }
 
 fn emit(canvas: &Canvas, theme: &Theme) -> String {
@@ -243,11 +281,23 @@ fn emit(canvas: &Canvas, theme: &Theme) -> String {
     out
 }
 
-fn draw_box(canvas: &mut Canvas, x: usize, y: usize, w: usize, h: usize, lines: &[String]) {
-    canvas.set(x, y, '╭', CellKind::Border);
-    canvas.set(x + w - 1, y, '╮', CellKind::Border);
-    canvas.set(x, y + h - 1, '╰', CellKind::Border);
-    canvas.set(x + w - 1, y + h - 1, '╯', CellKind::Border);
+fn draw_box(
+    canvas: &mut Canvas,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    lines: &[String],
+    shape: Shape,
+) {
+    let (tl, tr, bl, br) = match shape {
+        Shape::Round => ('╭', '╮', '╰', '╯'),
+        Shape::Square => ('┌', '┐', '└', '┘'),
+    };
+    canvas.set(x, y, tl, CellKind::Border);
+    canvas.set(x + w - 1, y, tr, CellKind::Border);
+    canvas.set(x, y + h - 1, bl, CellKind::Border);
+    canvas.set(x + w - 1, y + h - 1, br, CellKind::Border);
     for i in 1..w - 1 {
         canvas.set(x + i, y, '─', CellKind::Border);
         canvas.set(x + i, y + h - 1, '─', CellKind::Border);
