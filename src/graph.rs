@@ -40,6 +40,21 @@ pub enum EdgeStyle {
     Invisible,
 }
 
+impl EdgeStyle {
+    // Dominance for merging cells touched by multiple edges: Thick > Dotted > Normal.
+    pub fn max_over(self, other: Self) -> Self {
+        fn rank(s: EdgeStyle) -> u8 {
+            match s {
+                EdgeStyle::Thick => 3,
+                EdgeStyle::Dotted => 2,
+                EdgeStyle::Normal => 1,
+                EdgeStyle::Invisible => 0,
+            }
+        }
+        if rank(self) >= rank(other) { self } else { other }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Edge {
     pub from: NodeId,

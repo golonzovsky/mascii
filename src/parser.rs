@@ -168,41 +168,37 @@ fn parse_edge_line(g: &mut Graph, line: &str) -> Result<(), String> {
     Ok(())
 }
 
-// Mermaid node shape brackets → (open, close, Shape).
-// Diamond `{...}` still renders Round per request.
-const SHAPE_BRACKETS: &[(char, char, Shape)] = &[
-    ('[', ']', Shape::Square),
-    ('(', ')', Shape::Round),
-    ('{', '}', Shape::Round),
-];
+fn shape_for(open: char) -> Option<(char, Shape)> {
+    match open {
+        '[' => Some((']', Shape::Square)),
+        '(' => Some((')', Shape::Round)),
+        '{' => Some(('}', Shape::Round)),
+        _ => None,
+    }
+}
 
 fn parse_ident_label(s: &str) -> Result<(String, String, Shape), String> {
     let s = s.trim();
-    let first_open = s
-        .char_indices()
-        .find(|(_, c)| SHAPE_BRACKETS.iter().any(|(o, _, _)| *o == *c));
-    if let Some((i, open)) = first_open {
-        let (_, close, shape) = *SHAPE_BRACKETS
-            .iter()
-            .find(|(o, _, _)| *o == open)
-            .unwrap();
-        let name = s[..i].trim().to_string();
-        if name.is_empty() {
-            return Err(format!("empty node name in '{}'", s));
-        }
-        let rest = &s[i + open.len_utf8()..];
-        let end = rest
-            .rfind(close)
-            .ok_or_else(|| format!("missing closing '{}'", close))?;
-        let mut label = rest[..end].trim();
-        if label.len() >= 2 && label.starts_with('"') && label.ends_with('"') {
-            label = &label[1..label.len() - 1];
-        }
-        Ok((name, label.to_string(), shape))
-    } else {
-        if s.is_empty() {
-            return Err("empty identifier".to_string());
-        }
-        Ok((s.to_string(), String::new(), Shape::Round))
+    if s.is_empty() {
+        return Err("empty identifier".to_string());
     }
+    let Some((i, open, close, shape)) = s
+        .char_indices()
+        .find_map(|(i, c)| shape_for(c).map(|(cl, sh)| (i, c, cl, sh)))
+    else {
+        return Ok((s.to_string(), String::new(), Shape::Round));
+    };
+    let name = s[..i].trim().to_string();
+    if name.is_empty() {
+        return Err(format!("empty node name in '{}'", s));
+    }
+    let rest = &s[i + open.len_utf8()..];
+    let end = rest
+        .rfind(close)
+        .ok_or_else(|| format!("missing closing '{}'", close))?;
+    let mut label = rest[..end].trim();
+    if label.len() >= 2 && label.starts_with('"') && label.ends_with('"') {
+        label = &label[1..label.len() - 1];
+    }
+    Ok((name, label.to_string(), shape))
 }

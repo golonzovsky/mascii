@@ -185,7 +185,6 @@ fn assign_x(g: &mut Graph) {
         layer.sort_by_key(|&id| g.nodes[id].order);
     }
 
-    // Initial pack
     let mut layer_x: Vec<Vec<usize>> = vec![vec![]; max_layer + 1];
     for (l, layer) in layers.iter().enumerate() {
         let mut x = 0usize;
@@ -195,7 +194,6 @@ fn assign_x(g: &mut Graph) {
         }
     }
 
-    // Adjacency cache
     let n = g.nodes.len();
     let mut preds: Vec<Vec<NodeId>> = vec![vec![]; n];
     let mut succs: Vec<Vec<NodeId>> = vec![vec![]; n];
@@ -204,18 +202,14 @@ fn assign_x(g: &mut Graph) {
         preds[e.to].push(e.from);
     }
 
-    let pos_in_layer = |layers: &[Vec<NodeId>], id: NodeId, lyr: usize| -> usize {
-        layers[lyr].iter().position(|&x| x == id).unwrap()
-    };
-
     // Down passes align per-node to preds; up passes block-shift whole layer
     // (per-node up-alignment causes positive-feedback drift).
     for _ in 0..4 {
         for l in 1..=max_layer {
-            align_layer(&layers, &mut layer_x, l, &preds, g, &pos_in_layer);
+            align_layer(&layers, &mut layer_x, l, &preds, g);
         }
         for l in (0..max_layer).rev() {
-            block_shift_layer(&layers, &mut layer_x, l, &succs, g, &pos_in_layer);
+            block_shift_layer(&layers, &mut layer_x, l, &succs, g);
         }
         normalize_x(&mut layer_x);
     }
@@ -228,39 +222,46 @@ fn assign_x(g: &mut Graph) {
     }
 }
 
-fn block_shift_layer<F>(
+// Compute the barycenter of `id`'s neighbors' center-x positions (left edge).
+fn neighbor_target_x(
+    id: NodeId,
+    neighbors: &[NodeId],
+    layer_x: &[Vec<usize>],
+    g: &Graph,
+) -> Option<usize> {
+    if neighbors.is_empty() {
+        return None;
+    }
+    let center: f64 = neighbors
+        .iter()
+        .map(|&ni| {
+            let nl = g.nodes[ni].layer;
+            let np = g.nodes[ni].order;
+            (layer_x[nl][np] + g.nodes[ni].width / 2) as f64
+        })
+        .sum::<f64>()
+        / neighbors.len() as f64;
+    let half = g.nodes[id].width as f64 / 2.0;
+    Some(if center < half { 0 } else { (center - half).round() as usize })
+}
+
+fn block_shift_layer(
     layers: &[Vec<NodeId>],
     layer_x: &mut [Vec<usize>],
     l: usize,
     neighbors: &[Vec<NodeId>],
     g: &Graph,
-    pos_in_layer: &F,
-) where
-    F: Fn(&[Vec<NodeId>], NodeId, usize) -> usize,
-{
-    let n = layers[l].len();
-    if n == 0 {
+) {
+    if layers[l].is_empty() {
         return;
     }
     let mut sum_delta: i64 = 0;
     let mut count: i64 = 0;
     for (i, &id) in layers[l].iter().enumerate() {
-        let ns = &neighbors[id];
-        if ns.is_empty() {
+        let Some(target) = neighbor_target_x(id, &neighbors[id], layer_x, g) else {
             continue;
-        }
-        let target_center: f64 = ns
-            .iter()
-            .map(|&ni| {
-                let nl = g.nodes[ni].layer;
-                let np = pos_in_layer(layers, ni, nl);
-                (layer_x[nl][np] + g.nodes[ni].width / 2) as f64
-            })
-            .sum::<f64>()
-            / ns.len() as f64;
-        let half = g.nodes[id].width as f64 / 2.0;
-        let target_x = (target_center - half).round() as i64;
-        sum_delta += target_x - layer_x[l][i] as i64;
+        };
+        sum_delta += target as i64 - layer_x[l][i] as i64;
         count += 1;
     }
     if count == 0 {
@@ -277,7 +278,6 @@ fn block_shift_layer<F>(
         }
     } else {
         let s = (-shift) as usize;
-        // Don't shift below 0 — clamp at zero
         let leftmost = *layer_x[l].iter().min().unwrap();
         let actual = s.min(leftmost);
         for x in layer_x[l].iter_mut() {
@@ -303,45 +303,20 @@ fn normalize_x(layer_x: &mut [Vec<usize>]) {
     }
 }
 
-fn align_layer<F>(
+fn align_layer(
     layers: &[Vec<NodeId>],
     layer_x: &mut [Vec<usize>],
     l: usize,
     neighbors: &[Vec<NodeId>],
     g: &Graph,
-    pos_in_layer: &F,
-) where
-    F: Fn(&[Vec<NodeId>], NodeId, usize) -> usize,
-{
+) {
     let n = layers[l].len();
     if n == 0 {
         return;
     }
-    // Compute target x for each node (left edge), or None if no neighbors
     let targets: Vec<Option<usize>> = layers[l]
         .iter()
-        .map(|&id| {
-            let ns = &neighbors[id];
-            if ns.is_empty() {
-                return None;
-            }
-            let target_center: f64 = ns
-                .iter()
-                .map(|&ni| {
-                    let nl = g.nodes[ni].layer;
-                    let np = pos_in_layer(layers, ni, nl);
-                    (layer_x[nl][np] + g.nodes[ni].width / 2) as f64
-                })
-                .sum::<f64>()
-                / ns.len() as f64;
-            let half = g.nodes[id].width as f64 / 2.0;
-            let t = if target_center < half {
-                0
-            } else {
-                (target_center - half).round() as usize
-            };
-            Some(t)
-        })
+        .map(|&id| neighbor_target_x(id, &neighbors[id], layer_x, g))
         .collect();
 
     let mut new_x: Vec<usize> = vec![0; n];
