@@ -2,28 +2,18 @@ use std::collections::HashMap;
 
 pub type NodeId = usize;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Direction {
-    TD, // top-down (default); TB is an alias
-    LR, // left-right
+    #[default]
+    TD,
+    LR,
 }
 
-impl Default for Direction {
-    fn default() -> Self {
-        Direction::TD
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Shape {
-    Round,  // (...) and {...} and bare identifiers
-    Square, // [...]
-}
-
-impl Default for Shape {
-    fn default() -> Self {
-        Shape::Round
-    }
+    #[default]
+    Round,
+    Square,
 }
 
 #[derive(Debug, Clone)]
@@ -41,18 +31,13 @@ pub struct Node {
     pub y: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EdgeStyle {
-    Normal,    // -->
-    Thick,     // ==>
-    Dotted,    // -.->
-    Invisible, // ~~~
-}
-
-impl Default for EdgeStyle {
-    fn default() -> Self {
-        EdgeStyle::Normal
-    }
+    #[default]
+    Normal,
+    Thick,
+    Dotted,
+    Invisible,
 }
 
 #[derive(Debug, Clone)]

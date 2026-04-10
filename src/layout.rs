@@ -11,11 +11,7 @@ pub fn layout(mut g: Graph, padding: usize) -> Graph {
     insert_dummies(&mut g);
     order_layers(&mut g, 8);
 
-    // LR trick: swap each node's (width, height) so the TD positioning code
-    // — which stacks layers along y using heights and aligns within layer
-    // along x using widths — effectively stacks along the horizontal axis
-    // using visual widths. After positioning, we swap (x, y) and restore
-    // dimensions to their original values.
+    // LR: swap (w,h) before TD layout, swap (x,y) and restore (w,h) after.
     let lr = g.dir == Direction::LR;
     if lr {
         for n in &mut g.nodes {
@@ -76,8 +72,8 @@ fn assign_layers(g: &mut Graph) {
         }
     }
 
-    for i in 0..n {
-        g.nodes[i].layer = layer[i];
+    for (i, l) in layer.iter().enumerate() {
+        g.nodes[i].layer = *l;
     }
 }
 
@@ -90,8 +86,7 @@ fn insert_dummies(g: &mut Graph) {
             g.edges.push(e);
             continue;
         }
-        // Split long edge into chain. Keep the label on the FIRST hop only,
-        // so it renders in the channel directly below the source.
+        // Label stays on the first hop only.
         let mut prev = e.from;
         let mut label = e.label.clone();
         for l in (from_layer + 1)..to_layer {
@@ -147,6 +142,7 @@ fn order_layers(g: &mut Graph, iterations: usize) {
     }
 
     for _ in 0..iterations {
+        #[allow(clippy::needless_range_loop)]
         for l in 1..=max_layer {
             sort_layer_by_neighbors(&mut layers[l], &preds, g);
             for (i, &id) in layers[l].iter().enumerate() {
@@ -162,26 +158,21 @@ fn order_layers(g: &mut Graph, iterations: usize) {
     }
 }
 
-fn sort_layer_by_neighbors(layer: &mut Vec<NodeId>, neighbors: &[Vec<NodeId>], g: &Graph) {
-    let mut keyed: Vec<(NodeId, f64, usize)> = layer
-        .iter()
-        .enumerate()
-        .map(|(i, &id)| {
-            let ns = &neighbors[id];
-            let bary = if ns.is_empty() {
-                g.nodes[id].order as f64
-            } else {
-                ns.iter().map(|&ni| g.nodes[ni].order as f64).sum::<f64>() / ns.len() as f64
-            };
-            (id, bary, i)
-        })
-        .collect();
-    keyed.sort_by(|a, b| {
-        a.1.partial_cmp(&b.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.2.cmp(&b.2))
+fn sort_layer_by_neighbors(layer: &mut [NodeId], neighbors: &[Vec<NodeId>], g: &Graph) {
+    layer.sort_by(|&a, &b| {
+        let ba = barycenter(a, neighbors, g);
+        let bb = barycenter(b, neighbors, g);
+        ba.partial_cmp(&bb).unwrap_or(std::cmp::Ordering::Equal)
     });
-    *layer = keyed.into_iter().map(|(id, _, _)| id).collect();
+}
+
+fn barycenter(id: NodeId, neighbors: &[Vec<NodeId>], g: &Graph) -> f64 {
+    let ns = &neighbors[id];
+    if ns.is_empty() {
+        g.nodes[id].order as f64
+    } else {
+        ns.iter().map(|&ni| g.nodes[ni].order as f64).sum::<f64>() / ns.len() as f64
+    }
 }
 
 fn assign_x(g: &mut Graph) {
@@ -213,14 +204,12 @@ fn assign_x(g: &mut Graph) {
         preds[e.to].push(e.from);
     }
 
-    let pos_in_layer = |layers: &Vec<Vec<NodeId>>, id: NodeId, lyr: usize| -> usize {
+    let pos_in_layer = |layers: &[Vec<NodeId>], id: NodeId, lyr: usize| -> usize {
         layers[lyr].iter().position(|&x| x == id).unwrap()
     };
 
-    // Down passes use per-node alignment to children's preds.
-    // Up passes use a block-shift heuristic (move whole layer by avg of desired
-    // offsets) — per-node up alignment causes positive-feedback drift when
-    // siblings all target the same neighbor.
+    // Down passes align per-node to preds; up passes block-shift whole layer
+    // (per-node up-alignment causes positive-feedback drift).
     for _ in 0..4 {
         for l in 1..=max_layer {
             align_layer(&layers, &mut layer_x, l, &preds, g, &pos_in_layer);
@@ -240,14 +229,14 @@ fn assign_x(g: &mut Graph) {
 }
 
 fn block_shift_layer<F>(
-    layers: &Vec<Vec<NodeId>>,
-    layer_x: &mut Vec<Vec<usize>>,
+    layers: &[Vec<NodeId>],
+    layer_x: &mut [Vec<usize>],
     l: usize,
     neighbors: &[Vec<NodeId>],
     g: &Graph,
     pos_in_layer: &F,
 ) where
-    F: Fn(&Vec<Vec<NodeId>>, NodeId, usize) -> usize,
+    F: Fn(&[Vec<NodeId>], NodeId, usize) -> usize,
 {
     let n = layers[l].len();
     if n == 0 {
@@ -297,7 +286,7 @@ fn block_shift_layer<F>(
     }
 }
 
-fn normalize_x(layer_x: &mut Vec<Vec<usize>>) {
+fn normalize_x(layer_x: &mut [Vec<usize>]) {
     let global_min: usize = layer_x
         .iter()
         .flat_map(|v| v.iter())
@@ -315,14 +304,14 @@ fn normalize_x(layer_x: &mut Vec<Vec<usize>>) {
 }
 
 fn align_layer<F>(
-    layers: &Vec<Vec<NodeId>>,
-    layer_x: &mut Vec<Vec<usize>>,
+    layers: &[Vec<NodeId>],
+    layer_x: &mut [Vec<usize>],
     l: usize,
     neighbors: &[Vec<NodeId>],
     g: &Graph,
     pos_in_layer: &F,
 ) where
-    F: Fn(&Vec<Vec<NodeId>>, NodeId, usize) -> usize,
+    F: Fn(&[Vec<NodeId>], NodeId, usize) -> usize,
 {
     let n = layers[l].len();
     if n == 0 {
@@ -397,13 +386,7 @@ fn assign_y(g: &mut Graph) {
         }
     }
 
-    // Compute channel heights.
-    // In TD the channel is vertical — we bump by one row when any edge in
-    // the channel carries a label (the label gets its own row).
-    // In LR we're still running the TD algorithm (with swapped dims), but
-    // that produces an LR horizontal channel after the post-layout swap.
-    // Labels in LR need enough channel width to fit the text inline, so
-    // bump the channel by max label length + 2 spaces of breathing room.
+    // Channel size: bumped to fit edge labels.
     let mut channel_heights: Vec<usize> = vec![CHANNEL; max_layer];
     let lr = g.dir == Direction::LR;
     for e in &g.edges {
@@ -413,7 +396,6 @@ fn assign_y(g: &mut Graph) {
             continue;
         }
         if lr {
-            // Channel must fit: [pad `─`][label][pad `─`][`▶`]
             let needed = text.chars().count() + 2 * LR_LABEL_PAD + 1;
             if needed > channel_heights[l] {
                 channel_heights[l] = needed;

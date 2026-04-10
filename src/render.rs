@@ -56,9 +56,7 @@ impl Theme {
     }
 
     pub const fn neon() -> Self {
-        // Truecolor (24-bit) palette.
-        // Violet borders (#BC13FE), muted green lines/arrows (#4A8C5C),
-        // bright white labels, hot pink crossings (#FF1493).
+        // Violet borders, muted green lines, white labels, pink crossings.
         Self {
             border: Some("\x1b[38;2;188;19;254m"),
             label: Some("\x1b[38;2;255;255;255m"),
@@ -196,9 +194,7 @@ impl Canvas {
         // else: leave existing character
     }
 
-    // Merge a new corner onto an existing cell. Two corners sharing a side
-    // collapse into a tap (`┤`, `├`, `┬`, `┴`) and two opposite corners into
-    // a cross. Used for fan-out/fan-in where multiple edges share a turn.
+    // Merge corners: two sharing a side collapse into a tap.
     fn set_corner(&mut self, x: usize, y: usize, ch: char, kind: CellKind) {
         let cur = self.get_char(x, y);
         if cur == ' ' || cur == '─' || cur == '│' || cur == '━' || cur == '┃'
@@ -208,11 +204,8 @@ impl Canvas {
             return;
         }
         let merged = match (cur, ch) {
-            // Up-left corner + up-right corner → tap up (two verticals meet on bottom)
             ('╯', '╰') | ('╰', '╯') => Some('┴'),
-            // Down-left corner + down-right corner → tap down
             ('╭', '╮') | ('╮', '╭') => Some('┬'),
-            // Two vertical corners sharing "vertical-above" and "vertical-below" on left
             ('╯', '╮') | ('╮', '╯') => Some('┤'),
             ('╰', '╭') | ('╭', '╰') => Some('├'),
             _ => None,
@@ -251,8 +244,7 @@ pub fn render(g: &Graph, theme: &Theme) -> String {
         draw_box(&mut canvas, n.x, n.y, n.width, n.height, &n.label_lines, n.shape);
     }
 
-    // Dummies (pass-throughs) — use the style of the edge that enters the
-    // dummy, falling back to Normal. Invisible dummies render as blank.
+    // Dummies (pass-throughs) — inherit style from incoming edge.
     for n in &g.nodes {
         if !n.is_dummy {
             continue;
@@ -351,9 +343,7 @@ pub fn render(g: &Graph, theme: &Theme) -> String {
 }
 
 fn place_edge_label_td(canvas: &mut Canvas, sx: usize, sy: usize, text: &str) {
-    // Inline placement: center label on the edge column, breaking the `│`
-    // drop at that row. Only write over space or `│` cells, so we don't
-    // clobber a neighbour's line art.
+    // Center label on the edge column, replacing the `│` on that row.
     let row = sy + 1;
     if row >= canvas.chars.len() {
         return;
@@ -453,8 +443,7 @@ fn draw_box(
     }
 }
 
-// Inner range along the minor (cross) axis for a node.
-// TD minor = x, LR minor = y.
+// Minor-axis inner range (TD: x, LR: y).
 fn inner_range(n: &crate::graph::Node, dir: Direction) -> (usize, usize) {
     if n.is_dummy {
         match dir {
@@ -517,9 +506,7 @@ fn compute_endpoints(g: &Graph) -> HashMap<usize, (usize, usize, usize, usize)> 
         in_by_node.entry(e.to).or_default().push(i);
     }
 
-    // `exit_minor`/`entry_minor` are positions on the MINOR axis:
-    //   TD: minor = x (column along the box bottom/top)
-    //   LR: minor = y (row along the box right/left)
+    // Minor-axis ports per edge: TD=x (column), LR=y (row).
     let mut exit_minor: HashMap<usize, usize> = HashMap::new();
     let mut entry_minor: HashMap<usize, usize> = HashMap::new();
     for (i, e) in g.edges.iter().enumerate() {
@@ -613,9 +600,7 @@ fn clamp(v: usize, lo: usize, hi: usize) -> usize {
     }
 }
 
-// LR merge: sources on the left flow into a target on the right. The "bar"
-// is a vertical segment gathering all source y-positions, then a single
-// horizontal drop to the target's entry point.
+// LR merge: vertical bar collecting sources, then horizontal drop to target.
 fn draw_merge_lr(canvas: &mut Canvas, g: &Graph, target_id: NodeId, edge_ids: &[usize]) {
     let dst = &g.nodes[target_id];
     let dy = dst.y + dst.height / 2;
@@ -668,25 +653,17 @@ fn draw_merge_lr(canvas: &mut Canvas, g: &Graph, target_id: NodeId, edge_ids: &[
         canvas.set_overlay(mid_x, y, gl.vert, CellKind::Edge);
     }
 
-    // Source sites on the bar (horizontal enters from left).
-    //   bar_lo (top):       ╮  (horizontal-left + vertical-below)
-    //   bar_hi (bottom):    ╯  (horizontal-left + vertical-above)
-    //   intermediate:       ┤  (horizontal-left + vertical-both)
     for &(_, sy) in &srcs {
         let ch = if sy == bar_lo {
-            gl.corner_ul // ╮
+            gl.corner_ul
         } else if sy == bar_hi {
-            gl.corner_dr // ╯
+            gl.corner_dr
         } else {
             '┤'
         };
         canvas.set(mid_x, sy, ch, CellKind::Edge);
     }
 
-    // Target site on the bar (horizontal extends right to the target).
-    //   bar_lo (top):       ╭  (horizontal-right + vertical-below)
-    //   bar_hi (bottom):    ╰  (horizontal-right + vertical-above)
-    //   intermediate:       ├  (horizontal-right + vertical-both)
     let target_ch = if dy == bar_lo && dy != topmost_src {
         Some(gl.corner_ur)
     } else if dy == bar_hi && dy != bottommost_src {
@@ -712,9 +689,7 @@ fn draw_merge_lr(canvas: &mut Canvas, g: &Graph, target_id: NodeId, edge_ids: &[
 }
 
 fn place_edge_label_lr(canvas: &mut Canvas, sx: usize, sy: usize, text: &str) {
-    // Inline placement on the horizontal drop. Layout already widened the
-    // channel for us to fit: `─` * PAD + label + `─` * PAD + `▶`. Place the
-    // label leaving LR_LABEL_PAD horizontal line chars on each side.
+    // Centered on the horizontal drop, leaving LR_LABEL_PAD `─` chars each side.
     if sy >= canvas.chars.len() {
         return;
     }
@@ -723,19 +698,15 @@ fn place_edge_label_lr(canvas: &mut Canvas, sx: usize, sy: usize, text: &str) {
     if len == 0 {
         return;
     }
-    // Walk right from sx over horizontal-line / space cells to find the run.
     let mut run_end = sx;
     while run_end < row.len() && matches!(row[run_end], '─' | '━' | '┄' | ' ') {
         run_end += 1;
     }
     let run_len = run_end - sx;
     let pad = crate::layout::LR_LABEL_PAD;
-    // Need at minimum: pad + len + pad chars of run before any non-run char.
     if run_len < len + 2 * pad {
         return;
     }
-    // Center the label within the run, but never closer than `pad` to the
-    // start.
     let extra = run_len - len - 2 * pad;
     let start = sx + pad + extra / 2;
     for k in 0..len {
@@ -754,8 +725,7 @@ fn draw_merge_td(canvas: &mut Canvas, g: &Graph, target_id: NodeId, edge_ids: &[
     let dx = dst.x + dst.width / 2;
     let dy = dst.y;
 
-    // Pick glyphs: if any contributing edge is thick, render the whole merge
-    // thick; otherwise dotted if any is dotted; otherwise normal.
+    // Thick > Dotted > Normal.
     let style = if edge_ids.iter().any(|&i| g.edges[i].style == EdgeStyle::Thick) {
         EdgeStyle::Thick
     } else if edge_ids
@@ -879,9 +849,7 @@ fn draw_edge_td(
     }
 }
 
-// LR variant: edges flow left-to-right. sx/sy = exit point (just right of
-// source box), dx/dy = entry point (just left of target). The "channel" is
-// horizontal space between source's right edge and target's left edge.
+// LR variant: sx/sy = just right of source, dx/dy = just left of target.
 fn draw_edge_lr(
     canvas: &mut Canvas,
     sx: usize,
@@ -913,11 +881,11 @@ fn draw_edge_lr(
         canvas.set_overlay(mid_x, y, gl.vert, CellKind::Edge);
     }
     if sy < dy {
-        canvas.set_corner(mid_x, sy, gl.corner_ul, CellKind::Edge); // ╮
-        canvas.set_corner(mid_x, dy, gl.corner_dl, CellKind::Edge); // ╰
+        canvas.set_corner(mid_x, sy, gl.corner_ul, CellKind::Edge);
+        canvas.set_corner(mid_x, dy, gl.corner_dl, CellKind::Edge);
     } else {
-        canvas.set_corner(mid_x, sy, gl.corner_dr, CellKind::Edge); // ╯
-        canvas.set_corner(mid_x, dy, gl.corner_ur, CellKind::Edge); // ╭
+        canvas.set_corner(mid_x, sy, gl.corner_dr, CellKind::Edge);
+        canvas.set_corner(mid_x, dy, gl.corner_ur, CellKind::Edge);
     }
     for x in (mid_x + 1)..dx {
         canvas.set_overlay(x, dy, gl.horiz, CellKind::Edge);

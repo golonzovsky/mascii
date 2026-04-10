@@ -24,7 +24,6 @@ fn print_help() {
     println!("Reads from FILE if given, otherwise from stdin.");
     println!();
     println!("Options:");
-    println!("  --width N       max output width (currently advisory, default: 80)");
     println!("  --padding N     horizontal padding inside boxes (default: 1)");
     println!("  --theme NAME    color theme: grey (default), mono, neon, dim, none");
     println!("  --color WHEN    when to color: auto (default), always, never");
@@ -42,7 +41,6 @@ fn print_help() {
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let mut padding: usize = 1;
-    let mut _width: usize = 80;
     let mut input_path: Option<String> = None;
     let mut theme_name: String = "grey".to_string();
     let mut color_mode: ColorMode = ColorMode::Auto;
@@ -54,17 +52,6 @@ fn main() -> ExitCode {
             "-h" | "--help" => {
                 print_help();
                 return ExitCode::SUCCESS;
-            }
-            "--width" => {
-                i += 1;
-                let v = args.get(i).and_then(|s| s.parse().ok());
-                match v {
-                    Some(n) => _width = n,
-                    None => {
-                        eprintln!("--width requires a positive integer");
-                        return ExitCode::FAILURE;
-                    }
-                }
             }
             "--padding" => {
                 i += 1;

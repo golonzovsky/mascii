@@ -76,10 +76,6 @@ fn find_edge_op(s: &str, from: usize) -> Option<EdgeHit> {
     best
 }
 
-fn line_has_edge_op(s: &str) -> bool {
-    find_edge_op(s, 0).is_some()
-}
-
 pub fn parse(source: &str) -> Result<Graph, String> {
     let mut g = Graph::new();
     for (lineno, raw) in source.lines().enumerate() {
@@ -103,23 +99,19 @@ pub fn parse(source: &str) -> Result<Graph, String> {
             continue;
         }
 
-        if line_has_edge_op(line) {
+        let result = if find_edge_op(line, 0).is_some() {
             parse_edge_line(&mut g, line)
-                .map_err(|e| format!("line {}: {}", lineno + 1, e))?;
         } else {
-            parse_node_decl(&mut g, line)
-                .map_err(|e| format!("line {}: {}", lineno + 1, e))?;
-        }
+            let (name, label, shape) = parse_ident_label(line)?;
+            g.add_node(&name, &label, shape);
+            Ok(())
+        };
+        result.map_err(|e| format!("line {}: {}", lineno + 1, e))?;
     }
     if g.nodes.is_empty() {
         return Err("no nodes found".to_string());
     }
     Ok(g)
-}
-
-fn parse_node_decl(g: &mut Graph, line: &str) -> Result<NodeId, String> {
-    let (name, label, shape) = parse_ident_label(line)?;
-    Ok(g.add_node(&name, &label, shape))
 }
 
 fn parse_edge_line(g: &mut Graph, line: &str) -> Result<(), String> {
@@ -150,14 +142,15 @@ fn parse_edge_line(g: &mut Graph, line: &str) -> Result<(), String> {
         let mut p = raw.trim();
         // Pipe-form edge label `|text|` prefixes the target of the previous edge.
         let mut pipe_label: Option<String> = None;
-        if idx > 0 && p.starts_with('|') {
-            if let Some(end) = p[1..].find('|') {
-                let lbl = p[1..1 + end].trim().to_string();
-                if !lbl.is_empty() {
-                    pipe_label = Some(lbl);
-                }
-                p = p[end + 2..].trim();
+        if idx > 0
+            && p.starts_with('|')
+            && let Some(end) = p[1..].find('|')
+        {
+            let lbl = p[1..1 + end].trim().to_string();
+            if !lbl.is_empty() {
+                pipe_label = Some(lbl);
             }
+            p = p[end + 2..].trim();
         }
         if p.is_empty() {
             return Err(format!("empty endpoint in edge: {}", line));
