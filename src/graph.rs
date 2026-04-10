@@ -6,7 +6,16 @@ pub type NodeId = usize;
 pub enum Direction {
     #[default]
     TD,
+    BT,
     LR,
+    RL,
+}
+
+impl Direction {
+    /// Whether flow runs along the vertical (y) or horizontal (x) axis.
+    pub fn is_vertical(self) -> bool {
+        matches!(self, Direction::TD | Direction::BT)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -72,6 +81,9 @@ pub struct Edge {
     pub style: EdgeStyle,
     pub tip_fwd: ArrowTip,
     pub tip_back: bool,
+    /// Edge "rank" — 1 for a base `-->`, 2 for `--->`, 3 for `---->`, etc.
+    /// Used during layering to stretch long edges across more layers.
+    pub length: usize,
 }
 
 #[derive(Debug, Default)]
@@ -87,24 +99,24 @@ impl Graph {
         Self::default()
     }
 
-    pub fn add_node(&mut self, name: &str, label: &str, shape: Shape) -> NodeId {
+    pub fn add_node(&mut self, name: &str, label_lines: Vec<String>, shape: Shape) -> NodeId {
         if let Some(&id) = self.name_to_id.get(name) {
+            let has_real_label = !label_lines.iter().all(|l| l.is_empty());
             let n = &mut self.nodes[id];
-            if !label.is_empty()
+            if has_real_label
                 && n.label_lines.len() == 1
                 && n.label_lines[0] == n.name
             {
-                n.label_lines = vec![label.to_string()];
-                // A named shape declaration wins over the default Round.
+                n.label_lines = label_lines;
                 n.shape = shape;
             }
             return id;
         }
         let id = self.nodes.len();
-        let label_lines = if label.is_empty() {
+        let label_lines = if label_lines.iter().all(|l| l.is_empty()) {
             vec![name.to_string()]
         } else {
-            vec![label.to_string()]
+            label_lines
         };
         self.nodes.push(Node {
             id,
@@ -123,6 +135,7 @@ impl Graph {
         id
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn add_edge(
         &mut self,
         from: NodeId,
@@ -131,6 +144,7 @@ impl Graph {
         style: EdgeStyle,
         tip_fwd: ArrowTip,
         tip_back: bool,
+        length: usize,
     ) {
         self.edges.push(Edge {
             from,
@@ -139,6 +153,7 @@ impl Graph {
             style,
             tip_fwd,
             tip_back,
+            length: length.max(1),
         });
     }
 }

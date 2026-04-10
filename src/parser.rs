@@ -18,6 +18,8 @@ struct EdgeHit {
     tip_fwd: ArrowTip,
     // Also an arrow back at the source (for `<-->`).
     tip_back: bool,
+    /// Edge rank (1 = base length, 2 = `--->`, 3 = `---->`, …)
+    length: usize,
 }
 
 // Labeled forms. Opener requires trailing space; closer requires leading space.
@@ -45,6 +47,7 @@ fn try_simple_at(s: &str, pos: usize) -> Option<EdgeHit> {
             label: None,
             tip_fwd: ArrowTip::Arrow,
             tip_back: false,
+            length: 1,
         });
     }
 
@@ -63,6 +66,7 @@ fn try_simple_at(s: &str, pos: usize) -> Option<EdgeHit> {
                 label: None,
                 tip_fwd: ArrowTip::Arrow,
                 tip_back: true,
+                length: (dashes - 1).max(1),
             });
         }
     }
@@ -75,38 +79,23 @@ fn try_simple_at(s: &str, pos: usize) -> Option<EdgeHit> {
         }
         let dash_count = end - pos;
         if dash_count >= 2 && end < bytes.len() {
-            match bytes[end] {
-                b'>' => {
-                    return Some(EdgeHit {
-                        start: pos,
-                        end: end + 1,
-                        style: EdgeStyle::Normal,
-                        label: None,
-                        tip_fwd: ArrowTip::Arrow,
-                        tip_back: false,
-                    });
-                }
-                b'x' => {
-                    return Some(EdgeHit {
-                        start: pos,
-                        end: end + 1,
-                        style: EdgeStyle::Normal,
-                        label: None,
-                        tip_fwd: ArrowTip::Cross,
-                        tip_back: false,
-                    });
-                }
-                b'o' => {
-                    return Some(EdgeHit {
-                        start: pos,
-                        end: end + 1,
-                        style: EdgeStyle::Normal,
-                        label: None,
-                        tip_fwd: ArrowTip::Circle,
-                        tip_back: false,
-                    });
-                }
-                _ => {}
+            let tip = match bytes[end] {
+                b'>' => Some(ArrowTip::Arrow),
+                b'x' => Some(ArrowTip::Cross),
+                b'o' => Some(ArrowTip::Circle),
+                _ => None,
+            };
+            if let Some(tip_fwd) = tip {
+                return Some(EdgeHit {
+                    start: pos,
+                    end: end + 1,
+                    style: EdgeStyle::Normal,
+                    label: None,
+                    tip_fwd,
+                    tip_back: false,
+                    // 2 dashes = base length 1, 3 dashes = 2, …
+                    length: (dash_count - 1).max(1),
+                });
             }
         }
         if dash_count >= 3 {
@@ -117,6 +106,8 @@ fn try_simple_at(s: &str, pos: usize) -> Option<EdgeHit> {
                 label: None,
                 tip_fwd: ArrowTip::None,
                 tip_back: false,
+                // 3 dashes = base open, 4 = longer, …
+                length: (dash_count - 2).max(1),
             });
         }
     }
@@ -136,6 +127,7 @@ fn try_simple_at(s: &str, pos: usize) -> Option<EdgeHit> {
                 label: None,
                 tip_fwd: ArrowTip::Arrow,
                 tip_back: false,
+                length: (eq_count - 1).max(1),
             });
         }
         if eq_count >= 3 {
@@ -146,6 +138,7 @@ fn try_simple_at(s: &str, pos: usize) -> Option<EdgeHit> {
                 label: None,
                 tip_fwd: ArrowTip::None,
                 tip_back: false,
+                length: (eq_count - 2).max(1),
             });
         }
     }
@@ -157,6 +150,7 @@ fn try_simple_at(s: &str, pos: usize) -> Option<EdgeHit> {
             end: pos + 3,
             style: EdgeStyle::Invisible,
             label: None,
+            length: 1,
             tip_fwd: ArrowTip::None,
             tip_back: false,
         });
@@ -189,6 +183,7 @@ fn find_edge_op(s: &str, from: usize) -> Option<EdgeHit> {
                         label: Some(text.to_string()),
                         tip_fwd: ArrowTip::Arrow,
                         tip_back: false,
+                        length: 1,
                     };
                     if best.as_ref().is_none_or(|b| hit.start < b.start) {
                         best = Some(hit);
@@ -227,11 +222,16 @@ pub fn parse(source: &str) -> Result<Graph, String> {
             .or_else(|| line.strip_prefix("graph"))
         {
             let rest = rest.trim();
-            if rest.eq_ignore_ascii_case("LR") || rest.eq_ignore_ascii_case("RL") {
-                g.dir = Direction::LR;
+            g.dir = if rest.eq_ignore_ascii_case("LR") {
+                Direction::LR
+            } else if rest.eq_ignore_ascii_case("RL") {
+                Direction::RL
+            } else if rest.eq_ignore_ascii_case("BT") {
+                Direction::BT
             } else {
-                g.dir = Direction::TD;
-            }
+                // TD / TB / anything else → top-down
+                Direction::TD
+            };
             continue;
         }
 
@@ -239,7 +239,7 @@ pub fn parse(source: &str) -> Result<Graph, String> {
             parse_edge_line(&mut g, line)
         } else {
             let (name, label, shape) = parse_ident_label(line)?;
-            g.add_node(&name, &label, shape);
+            g.add_node(&name, split_br(&label), shape);
             Ok(())
         };
         result.map_err(|e| format!("line {}: {}", lineno + 1, e))?;
@@ -300,7 +300,7 @@ fn parse_edge_line(g: &mut Graph, line: &str) -> Result<(), String> {
                 return Err(format!("empty endpoint in edge: {}", line));
             }
             let (name, label, shape) = parse_ident_label(part)?;
-            group.push(g.add_node(&name, &label, shape));
+            group.push(g.add_node(&name, split_br(&label), shape));
         }
         groups.push(group);
         pipe_labels.push(pipe_label);
@@ -319,7 +319,7 @@ fn parse_edge_line(g: &mut Graph, line: &str) -> Result<(), String> {
         let right = groups[i].clone();
         for &from in &left {
             for &to in &right {
-                g.add_edge(from, to, edge_label.clone(), hit.style, tip_fwd, hit.tip_back);
+                g.add_edge(from, to, edge_label.clone(), hit.style, tip_fwd, hit.tip_back, hit.length);
             }
         }
     }
@@ -344,7 +344,7 @@ fn parse_ident_label(s: &str) -> Result<(String, String, Shape), String> {
         .char_indices()
         .find_map(|(i, c)| shape_for(c).map(|(cl, sh)| (i, c, cl, sh)))
     else {
-        return Ok((s.to_string(), String::new(), Shape::Round));
+        return Ok((s.to_string(), clean_label(s), Shape::Round));
     };
     let name = s[..i].trim().to_string();
     if name.is_empty() {
@@ -358,5 +358,52 @@ fn parse_ident_label(s: &str) -> Result<(String, String, Shape), String> {
     if label.len() >= 2 && label.starts_with('"') && label.ends_with('"') {
         label = &label[1..label.len() - 1];
     }
-    Ok((name, label.to_string(), shape))
+    Ok((name, clean_label(label), shape))
+}
+
+/// Strip Font Awesome prefix tokens and normalize the label. Does NOT split on
+/// `<br>` — that's the caller's job via `split_br`.
+fn clean_label(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for word in s.split_whitespace() {
+        // Mermaid uses `fa:fa-something` or `fa:name` for FontAwesome icons;
+        // we render as text so just drop them.
+        if word.starts_with("fa:") {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    out
+}
+
+/// Split a label string on `<br>` / `<br/>` / `<br />` into rendered lines.
+pub fn split_br(label: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = label;
+    loop {
+        // Case-insensitive search for the first `<br`
+        let idx = rest
+            .char_indices()
+            .find(|&(i, _)| rest[i..].to_ascii_lowercase().starts_with("<br"));
+        let Some((i, _)) = idx else {
+            out.push(rest.trim().to_string());
+            break;
+        };
+        out.push(rest[..i].trim().to_string());
+        // Find the closing `>`.
+        let after = &rest[i..];
+        let Some(close) = after.find('>') else {
+            // Malformed — take the rest verbatim.
+            out.push(after.trim().to_string());
+            break;
+        };
+        rest = &after[close + 1..];
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
 }

@@ -2,6 +2,7 @@ mod graph;
 mod layout;
 mod parser;
 mod render;
+mod style;
 
 use std::fs;
 use std::io::{self, IsTerminal, Read};

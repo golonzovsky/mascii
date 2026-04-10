@@ -4,14 +4,11 @@ const CHANNEL: usize = 3;
 // LR-only: horizontal `─` padding on each side of an inline edge label.
 pub const LR_LABEL_PAD: usize = 2;
 
-// Within-layer packing gap. Horizontal in TD (4 cols feels comfortable),
-// vertical in LR (3 rows lines up with standard 3-row node heights so
-// single-node layers can sit exactly centered).
+// Within-layer packing gap. Horizontal in TD/BT (4 cols feels comfortable),
+// vertical in LR/RL (3 rows lines up with standard 3-row node heights so
+// single-node layers sit exactly centered).
 fn minor_gap(dir: Direction) -> usize {
-    match dir {
-        Direction::TD => 4,
-        Direction::LR => 3,
-    }
+    if dir.is_vertical() { 4 } else { 3 }
 }
 
 pub fn layout(mut g: Graph, padding: usize) -> Graph {
@@ -21,16 +18,17 @@ pub fn layout(mut g: Graph, padding: usize) -> Graph {
     order_layers(&mut g, 8);
 
     let dir = g.dir;
-    // LR: swap (w,h) before TD layout, swap (x,y) and restore (w,h) after.
-    let lr = dir == Direction::LR;
-    if lr {
+    // Run as TD (or LR if horizontal). BT/RL are handled as a post-render
+    // canvas flip in render.rs.
+    let horizontal = !dir.is_vertical();
+    if horizontal {
         for n in &mut g.nodes {
             std::mem::swap(&mut n.width, &mut n.height);
         }
     }
     assign_x(&mut g, minor_gap(dir));
     assign_y(&mut g);
-    if lr {
+    if horizontal {
         for n in &mut g.nodes {
             std::mem::swap(&mut n.x, &mut n.y);
             std::mem::swap(&mut n.width, &mut n.height);
@@ -60,10 +58,11 @@ fn compute_node_dims(g: &mut Graph, padding: usize) {
 fn assign_layers(g: &mut Graph) {
     let n = g.nodes.len();
     let mut indeg = vec![0usize; n];
-    let mut adj: Vec<Vec<NodeId>> = vec![vec![]; n];
+    // Adjacency list carrying (target, edge length).
+    let mut adj: Vec<Vec<(NodeId, usize)>> = vec![vec![]; n];
     for e in &g.edges {
         indeg[e.to] += 1;
-        adj[e.from].push(e.to);
+        adj[e.from].push((e.to, e.length));
     }
 
     let mut layer = vec![0usize; n];
@@ -71,9 +70,9 @@ fn assign_layers(g: &mut Graph) {
     let mut queue: Vec<NodeId> = (0..n).filter(|&i| remaining[i] == 0).collect();
 
     while let Some(u) = queue.pop() {
-        for &v in &adj[u] {
-            if layer[v] < layer[u] + 1 {
-                layer[v] = layer[u] + 1;
+        for &(v, len) in &adj[u] {
+            if layer[v] < layer[u] + len {
+                layer[v] = layer[u] + len;
             }
             remaining[v] -= 1;
             if remaining[v] == 0 {
@@ -121,6 +120,7 @@ fn insert_dummies(g: &mut Graph) {
                 style: e.style,
                 tip_fwd: ArrowTip::None,
                 tip_back: false,
+                length: 1,
             });
             prev = id;
         }
@@ -131,6 +131,7 @@ fn insert_dummies(g: &mut Graph) {
             style: e.style,
             tip_fwd: e.tip_fwd,
             tip_back: e.tip_back,
+            length: 1,
         });
     }
 }
@@ -399,14 +400,14 @@ fn assign_y(g: &mut Graph) {
 
     // Channel size: bumped to fit edge labels.
     let mut channel_heights: Vec<usize> = vec![CHANNEL; max_layer];
-    let lr = g.dir == Direction::LR;
+    let horizontal = !g.dir.is_vertical();
     for e in &g.edges {
         let Some(text) = e.label.as_ref() else { continue };
         let l = g.nodes[e.from].layer;
         if l >= max_layer {
             continue;
         }
-        if lr {
+        if horizontal {
             let needed = text.chars().count() + 2 * LR_LABEL_PAD + 1;
             if needed > channel_heights[l] {
                 channel_heights[l] = needed;

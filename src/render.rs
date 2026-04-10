@@ -1,4 +1,5 @@
 use crate::graph::{ArrowTip, Direction, EdgeStyle, Graph, NodeId, Shape};
+use crate::style::{Color, Style};
 use std::collections::HashMap;
 
 const RESET: &str = "\x1b[0m";
@@ -16,70 +17,69 @@ pub enum CellKind {
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Theme {
-    pub border: Option<&'static str>,
-    pub label: Option<&'static str>,
-    pub edge: Option<&'static str>,
-    pub arrow: Option<&'static str>,
-    pub crossing: Option<&'static str>,
+    pub border: Style,
+    pub label: Style,
+    pub edge: Style,
+    pub arrow: Style,
+    pub crossing: Style,
 }
 
 impl Theme {
     pub const fn plain() -> Self {
         Self {
-            border: None,
-            label: None,
-            edge: None,
-            arrow: None,
-            crossing: None,
+            border: Style::new(),
+            label: Style::new(),
+            edge: Style::new(),
+            arrow: Style::new(),
+            crossing: Style::new(),
         }
     }
 
     pub const fn grey() -> Self {
-        const G: &str = "\x1b[90m";
+        let g = Style::fg(Color::GREY);
         Self {
-            border: Some(G),
-            label: None,
-            edge: Some(G),
-            arrow: Some(G),
-            crossing: Some(G),
+            border: g,
+            label: Style::new(),
+            edge: g,
+            arrow: g,
+            crossing: g,
         }
     }
 
     pub const fn mono() -> Self {
         Self {
-            border: Some("\x1b[90m"),
-            label: None,
-            edge: Some("\x1b[90m"),
-            arrow: Some("\x1b[97m"),
-            crossing: Some("\x1b[93m"),
+            border: Style::fg(Color::GREY),
+            label: Style::new(),
+            edge: Style::fg(Color::GREY),
+            arrow: Style::fg(Color::BRIGHT_WHITE),
+            crossing: Style::fg(Color::BRIGHT_YELLOW),
         }
     }
 
     pub const fn neon() -> Self {
         // Violet borders, muted green lines, white labels, pink crossings.
         Self {
-            border: Some("\x1b[38;2;188;19;254m"),
-            label: Some("\x1b[38;2;255;255;255m"),
-            edge: Some("\x1b[38;2;110;190;130m"),
-            arrow: Some("\x1b[38;2;110;190;130m"),
-            crossing: Some("\x1b[38;2;255;20;147m"),
+            border: Style::fg(Color::VIOLET),
+            label: Style::fg(Color::WHITE),
+            edge: Style::fg(Color::NEON_GREEN),
+            arrow: Style::fg(Color::NEON_GREEN),
+            crossing: Style::fg(Color::HOT_PINK),
         }
     }
 
     pub const fn dim() -> Self {
-        const D: &str = "\x1b[2m";
         Self {
-            border: Some(D),
-            label: Some(D),
-            edge: Some(D),
-            arrow: Some(D),
-            crossing: Some(D),
+            border: Style::dim(),
+            label: Style::dim(),
+            edge: Style::dim(),
+            arrow: Style::dim(),
+            crossing: Style::dim(),
         }
     }
 
-    fn color_for(&self, kind: CellKind) -> Option<&'static str> {
+    fn style_for(&self, kind: CellKind) -> Style {
         match kind {
-            CellKind::Empty => None,
+            CellKind::Empty => Style::new(),
             CellKind::Border => self.border,
             CellKind::Label => self.label,
             CellKind::Edge => self.edge,
@@ -122,71 +122,132 @@ fn lineart(sides: u8, style: EdgeStyle) -> char {
     }
 }
 
-// Direction-aware axis mapping. Every `draw_edge` / `draw_merge` works in
-// (major, minor) coordinates; Axes converts to (x, y) and supplies direction-
-// appropriate side bits and arrow glyph.
+// Internally `Axes` always flows TD or LR; BT/RL are emitted by flipping the
+// whole canvas at the end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InnerDir {
+    TD,
+    LR,
+}
+
+fn inner_dir(dir: Direction) -> InnerDir {
+    if dir.is_vertical() {
+        InnerDir::TD
+    } else {
+        InnerDir::LR
+    }
+}
+
+fn flip_glyph_v(ch: char) -> char {
+    match ch {
+        '▼' => '▲',
+        '▲' => '▼',
+        '╭' => '╰',
+        '╮' => '╯',
+        '╰' => '╭',
+        '╯' => '╮',
+        '┌' => '└',
+        '┐' => '┘',
+        '└' => '┌',
+        '┘' => '┐',
+        '┏' => '┗',
+        '┓' => '┛',
+        '┗' => '┏',
+        '┛' => '┓',
+        '┬' => '┴',
+        '┴' => '┬',
+        '┳' => '┻',
+        '┻' => '┳',
+        '╱' => '╲',
+        '╲' => '╱',
+        _ => ch,
+    }
+}
+
+fn flip_glyph_h(ch: char) -> char {
+    match ch {
+        '▶' => '◀',
+        '◀' => '▶',
+        '╭' => '╮',
+        '╮' => '╭',
+        '╰' => '╯',
+        '╯' => '╰',
+        '┌' => '┐',
+        '┐' => '┌',
+        '└' => '┘',
+        '┘' => '└',
+        '┏' => '┓',
+        '┓' => '┏',
+        '┗' => '┛',
+        '┛' => '┗',
+        '├' => '┤',
+        '┤' => '├',
+        '┣' => '┫',
+        '┫' => '┣',
+        '╱' => '╲',
+        '╲' => '╱',
+        _ => ch,
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Axes {
-    dir: Direction,
+    dir: InnerDir,
 }
 
 impl Axes {
     fn xy(self, major: usize, minor: usize) -> (usize, usize) {
         match self.dir {
-            Direction::TD => (minor, major),
-            Direction::LR => (major, minor),
+            InnerDir::TD => (minor, major),
+            InnerDir::LR => (major, minor),
         }
     }
     fn major_sides(self) -> u8 {
         match self.dir {
-            Direction::TD => UP | DOWN,
-            Direction::LR => LEFT | RIGHT,
+            InnerDir::TD => UP | DOWN,
+            InnerDir::LR => LEFT | RIGHT,
         }
     }
     fn minor_sides(self) -> u8 {
         match self.dir {
-            Direction::TD => LEFT | RIGHT,
-            Direction::LR => UP | DOWN,
+            InnerDir::TD => LEFT | RIGHT,
+            InnerDir::LR => UP | DOWN,
         }
     }
-    // "back" along major = toward the source (TD: UP; LR: LEFT)
     fn major_back(self) -> u8 {
         match self.dir {
-            Direction::TD => UP,
-            Direction::LR => LEFT,
+            InnerDir::TD => UP,
+            InnerDir::LR => LEFT,
         }
     }
-    // "forward" along major = toward the target (TD: DOWN; LR: RIGHT)
     fn major_fwd(self) -> u8 {
         match self.dir {
-            Direction::TD => DOWN,
-            Direction::LR => RIGHT,
+            InnerDir::TD => DOWN,
+            InnerDir::LR => RIGHT,
         }
     }
-    // -minor (TD: LEFT; LR: UP)
     fn minor_back(self) -> u8 {
         match self.dir {
-            Direction::TD => LEFT,
-            Direction::LR => UP,
+            InnerDir::TD => LEFT,
+            InnerDir::LR => UP,
         }
     }
-    // +minor (TD: RIGHT; LR: DOWN)
     fn minor_fwd(self) -> u8 {
         match self.dir {
-            Direction::TD => RIGHT,
-            Direction::LR => DOWN,
+            InnerDir::TD => RIGHT,
+            InnerDir::LR => DOWN,
         }
     }
     fn arrow(self) -> char {
         match self.dir {
-            Direction::TD => '▼',
-            Direction::LR => '▶',
+            InnerDir::TD => '▼',
+            InnerDir::LR => '▶',
         }
     }
     fn back_arrow(self) -> char {
         match self.dir {
-            Direction::TD => '▲',
-            Direction::LR => '◀',
+            InnerDir::TD => '▲',
+            InnerDir::LR => '◀',
         }
     }
 }
@@ -227,6 +288,54 @@ impl Canvas {
         if self.in_bounds(x, y) {
             self.chars[y][x] = ch;
             self.kinds[y][x] = kind;
+        }
+    }
+
+    /// Reverse row order and vertically mirror every directional glyph.
+    fn flip_v(&mut self) {
+        self.chars.reverse();
+        self.kinds.reverse();
+        self.sides.reverse();
+        self.cell_style.reverse();
+        for row in &mut self.chars {
+            for c in row.iter_mut() {
+                *c = flip_glyph_v(*c);
+            }
+        }
+    }
+
+    /// Reverse column order within each row and horizontally mirror every
+    /// directional glyph. Label runs are re-reversed so text reads forward.
+    fn flip_h(&mut self) {
+        for row in &mut self.chars {
+            row.reverse();
+            for c in row.iter_mut() {
+                *c = flip_glyph_h(*c);
+            }
+        }
+        for row in &mut self.kinds {
+            row.reverse();
+        }
+        for row in &mut self.sides {
+            row.reverse();
+        }
+        for row in &mut self.cell_style {
+            row.reverse();
+        }
+        // Re-reverse any contiguous run of Label cells so text reads L→R.
+        for (chars, kinds) in self.chars.iter_mut().zip(self.kinds.iter()) {
+            let mut i = 0;
+            while i < kinds.len() {
+                if kinds[i] == CellKind::Label {
+                    let start = i;
+                    while i < kinds.len() && kinds[i] == CellKind::Label {
+                        i += 1;
+                    }
+                    chars[start..i].reverse();
+                } else {
+                    i += 1;
+                }
+            }
         }
     }
 
@@ -275,15 +384,22 @@ pub fn render(g: &Graph, theme: &Theme) -> String {
 
     let mut canvas = Canvas::new(width, height);
 
-    // Boxes first
+    // Boxes first. For directions that require a final canvas flip (BT / RL),
+    // pre-reverse the label lines so they read naturally after the flip.
+    let reverse_label_rows = g.dir == Direction::BT;
     for n in &g.nodes {
         if n.is_dummy {
             continue;
         }
-        draw_box(&mut canvas, n.x, n.y, n.width, n.height, &n.label_lines, n.shape);
+        let lines: Vec<String> = if reverse_label_rows {
+            n.label_lines.iter().rev().cloned().collect()
+        } else {
+            n.label_lines.clone()
+        };
+        draw_box(&mut canvas, n.x, n.y, n.width, n.height, &lines, n.shape);
     }
 
-    let axes = Axes { dir: g.dir };
+    let axes = Axes { dir: inner_dir(g.dir) };
 
     // Dummies (pass-throughs) — inherit style from incoming edge.
     for n in &g.nodes {
@@ -299,9 +415,9 @@ pub fn render(g: &Graph, theme: &Theme) -> String {
         if style == EdgeStyle::Invisible {
             continue;
         }
-        let (major_start, major_end, minor) = match g.dir {
-            Direction::TD => (n.y, n.y + n.height, n.x),
-            Direction::LR => (n.x, n.x + n.width, n.y),
+        let (major_start, major_end, minor) = match axes.dir {
+            InnerDir::TD => (n.y, n.y + n.height, n.x),
+            InnerDir::LR => (n.x, n.x + n.width, n.y),
         };
         for m in major_start..major_end {
             let (x, y) = axes.xy(m, minor);
@@ -332,9 +448,9 @@ pub fn render(g: &Graph, theme: &Theme) -> String {
         if visible.len() == 1 || target.is_dummy {
             for i in visible {
                 let (sx, sy, dx, dy) = endpoints[i];
-                let (sm, smn, dm, dmn) = match g.dir {
-                    Direction::TD => (sy, sx, dy, dx),
-                    Direction::LR => (sx, sy, dx, dy),
+                let (sm, smn, dm, dmn) = match axes.dir {
+                    InnerDir::TD => (sy, sx, dy, dx),
+                    InnerDir::LR => (sx, sy, dx, dy),
                 };
                 let e = &g.edges[i];
                 // Dummy targets never get a visible tip.
@@ -366,10 +482,16 @@ pub fn render(g: &Graph, theme: &Theme) -> String {
             continue;
         }
         let (sx, sy, _dx, _dy) = endpoints[i];
-        match g.dir {
-            Direction::TD => place_edge_label_td(&mut canvas, sx, sy, text),
-            Direction::LR => place_edge_label_lr(&mut canvas, sx, sy, text),
+        match axes.dir {
+            InnerDir::TD => place_edge_label_td(&mut canvas, sx, sy, text),
+            InnerDir::LR => place_edge_label_lr(&mut canvas, sx, sy, text),
         }
+    }
+
+    match g.dir {
+        Direction::BT => canvas.flip_v(),
+        Direction::RL => canvas.flip_h(),
+        _ => {}
     }
 
     emit(&canvas, theme)
@@ -404,7 +526,6 @@ fn place_edge_label_td(canvas: &mut Canvas, sx: usize, sy: usize, text: &str) {
 fn emit(canvas: &Canvas, theme: &Theme) -> String {
     let mut out = String::new();
     for (row_chars, row_kinds) in canvas.chars.iter().zip(canvas.kinds.iter()) {
-        // Find last non-empty char for trimming
         let last_nonempty = row_chars.iter().rposition(|&c| c != ' ');
         let end = match last_nonempty {
             Some(i) => i + 1,
@@ -413,29 +534,30 @@ fn emit(canvas: &Canvas, theme: &Theme) -> String {
                 continue;
             }
         };
-        let mut current: Option<&'static str> = None;
+        let mut current = Style::new();
         for i in 0..end {
             let ch = row_chars[i];
             let kind = row_kinds[i];
-            let want = theme.color_for(kind);
+            let want = theme.style_for(kind);
             if want != current {
-                if current.is_some() {
+                if !current.is_empty() {
                     out.push_str(RESET);
                 }
-                if let Some(code) = want {
-                    out.push_str(code);
-                }
+                want.write(&mut out);
                 current = want;
             }
             out.push(ch);
         }
-        if current.is_some() {
+        if !current.is_empty() {
             out.push_str(RESET);
         }
         out.push('\n');
     }
     while out.ends_with("\n\n") {
         out.pop();
+    }
+    while out.starts_with('\n') {
+        out.remove(0);
     }
     out
 }
@@ -477,22 +599,22 @@ fn draw_box(
 }
 
 // Minor-axis inner range (TD: x, LR: y).
-fn inner_range(n: &crate::graph::Node, dir: Direction) -> (usize, usize) {
+fn inner_range(n: &crate::graph::Node, dir: InnerDir) -> (usize, usize) {
     if n.is_dummy {
         match dir {
-            Direction::TD => (n.x, n.x),
-            Direction::LR => (n.y, n.y),
+            InnerDir::TD => (n.x, n.x),
+            InnerDir::LR => (n.y, n.y),
         }
     } else {
         match dir {
-            Direction::TD => {
+            InnerDir::TD => {
                 if n.width >= 3 {
                     (n.x + 1, n.x + n.width - 2)
                 } else {
                     (n.x, n.x + n.width.saturating_sub(1))
                 }
             }
-            Direction::LR => {
+            InnerDir::LR => {
                 if n.height >= 3 {
                     (n.y + 1, n.y + n.height - 2)
                 } else {
@@ -503,17 +625,17 @@ fn inner_range(n: &crate::graph::Node, dir: Direction) -> (usize, usize) {
     }
 }
 
-fn minor_center(n: &crate::graph::Node, dir: Direction) -> usize {
+fn minor_center(n: &crate::graph::Node, dir: InnerDir) -> usize {
     match dir {
-        Direction::TD => n.x + n.width / 2,
-        Direction::LR => n.y + n.height / 2,
+        InnerDir::TD => n.x + n.width / 2,
+        InnerDir::LR => n.y + n.height / 2,
     }
 }
 
 fn preferred_endpoints(
     src: &crate::graph::Node,
     dst: &crate::graph::Node,
-    dir: Direction,
+    dir: InnerDir,
 ) -> (usize, usize) {
     let (slo, shi) = inner_range(src, dir);
     let (dlo, dhi) = inner_range(dst, dir);
@@ -551,7 +673,7 @@ fn spread_ports(ports: &mut [usize], lo: usize, hi: usize) {
 }
 
 fn compute_endpoints(g: &Graph) -> Vec<(usize, usize, usize, usize)> {
-    let dir = g.dir;
+    let dir = inner_dir(g.dir);
     let n_edges = g.edges.len();
 
     // Initial per-edge minor-axis ports (TD=x, LR=y).
@@ -596,8 +718,8 @@ fn compute_endpoints(g: &Graph) -> Vec<(usize, usize, usize, usize)> {
             let src = &g.nodes[g.edges[i].from];
             let dst = &g.nodes[g.edges[i].to];
             match dir {
-                Direction::TD => (exit_minor[i], src.y + src.height, entry_minor[i], dst.y),
-                Direction::LR => (src.x + src.width, exit_minor[i], dst.x, entry_minor[i]),
+                InnerDir::TD => (exit_minor[i], src.y + src.height, entry_minor[i], dst.y),
+                InnerDir::LR => (src.x + src.width, exit_minor[i], dst.x, entry_minor[i]),
             }
         })
         .collect()
@@ -693,8 +815,8 @@ fn draw_merge(
 ) {
     let dst = &g.nodes[target_id];
     let (dm, dmn) = match axes.dir {
-        Direction::TD => (dst.y, dst.x + dst.width / 2),
-        Direction::LR => (dst.x, dst.y + dst.height / 2),
+        InnerDir::TD => (dst.y, dst.x + dst.width / 2),
+        InnerDir::LR => (dst.x, dst.y + dst.height / 2),
     };
 
     let style = edge_ids
@@ -708,8 +830,8 @@ fn draw_merge(
         .map(|&ei| {
             let s = &g.nodes[g.edges[ei].from];
             let (m, mn) = match axes.dir {
-                Direction::TD => (s.y + s.height, s.x + s.width / 2),
-                Direction::LR => (s.x + s.width, s.y + s.height / 2),
+                InnerDir::TD => (s.y + s.height, s.x + s.width / 2),
+                InnerDir::LR => (s.x + s.width, s.y + s.height / 2),
             };
             (m, mn, g.edges[ei].style)
         })
