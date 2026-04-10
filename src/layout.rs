@@ -1,9 +1,18 @@
-use crate::graph::{Direction, Edge, Graph, Node, NodeId, Shape};
+use crate::graph::{ArrowTip, Direction, Edge, Graph, Node, NodeId, Shape};
 
-const GAP: usize = 4;
 const CHANNEL: usize = 3;
 // LR-only: horizontal `─` padding on each side of an inline edge label.
 pub const LR_LABEL_PAD: usize = 2;
+
+// Within-layer packing gap. Horizontal in TD (4 cols feels comfortable),
+// vertical in LR (3 rows lines up with standard 3-row node heights so
+// single-node layers can sit exactly centered).
+fn minor_gap(dir: Direction) -> usize {
+    match dir {
+        Direction::TD => 4,
+        Direction::LR => 3,
+    }
+}
 
 pub fn layout(mut g: Graph, padding: usize) -> Graph {
     compute_node_dims(&mut g, padding);
@@ -11,14 +20,15 @@ pub fn layout(mut g: Graph, padding: usize) -> Graph {
     insert_dummies(&mut g);
     order_layers(&mut g, 8);
 
+    let dir = g.dir;
     // LR: swap (w,h) before TD layout, swap (x,y) and restore (w,h) after.
-    let lr = g.dir == Direction::LR;
+    let lr = dir == Direction::LR;
     if lr {
         for n in &mut g.nodes {
             std::mem::swap(&mut n.width, &mut n.height);
         }
     }
-    assign_x(&mut g);
+    assign_x(&mut g, minor_gap(dir));
     assign_y(&mut g);
     if lr {
         for n in &mut g.nodes {
@@ -109,6 +119,8 @@ fn insert_dummies(g: &mut Graph) {
                 to: id,
                 label: label.take(),
                 style: e.style,
+                tip_fwd: ArrowTip::None,
+                tip_back: false,
             });
             prev = id;
         }
@@ -117,6 +129,8 @@ fn insert_dummies(g: &mut Graph) {
             to: e.to,
             label: None,
             style: e.style,
+            tip_fwd: e.tip_fwd,
+            tip_back: e.tip_back,
         });
     }
 }
@@ -175,7 +189,7 @@ fn barycenter(id: NodeId, neighbors: &[Vec<NodeId>], g: &Graph) -> f64 {
     }
 }
 
-fn assign_x(g: &mut Graph) {
+fn assign_x(g: &mut Graph, gap: usize) {
     let max_layer = g.nodes.iter().map(|n| n.layer).max().unwrap_or(0);
     let mut layers: Vec<Vec<NodeId>> = vec![vec![]; max_layer + 1];
     for n in &g.nodes {
@@ -190,7 +204,7 @@ fn assign_x(g: &mut Graph) {
         let mut x = 0usize;
         for &id in layer {
             layer_x[l].push(x);
-            x += g.nodes[id].width + GAP;
+            x += g.nodes[id].width + gap;
         }
     }
 
@@ -206,12 +220,35 @@ fn assign_x(g: &mut Graph) {
     // (per-node up-alignment causes positive-feedback drift).
     for _ in 0..4 {
         for l in 1..=max_layer {
-            align_layer(&layers, &mut layer_x, l, &preds, g);
+            align_layer(&layers, &mut layer_x, l, &preds, g, gap);
         }
         for l in (0..max_layer).rev() {
             block_shift_layer(&layers, &mut layer_x, l, &succs, g);
         }
         normalize_x(&mut layer_x);
+    }
+
+    // Single-node layer symmetry: solitary roots/leaves/middle nodes end up
+    // centered exactly on the midpoint of their (preds + succs), so a root
+    // with siblings b,c and a leaf with the same preds land on the same column.
+    for l in 0..=max_layer {
+        if layers[l].len() != 1 {
+            continue;
+        }
+        let id = layers[l][0];
+        let mut centers: Vec<f64> = Vec::new();
+        for &ni in preds[id].iter().chain(succs[id].iter()) {
+            let np = g.nodes[ni].order;
+            let nl = g.nodes[ni].layer;
+            centers.push(layer_x[nl][np] as f64 + g.nodes[ni].width as f64 / 2.0);
+        }
+        if centers.is_empty() {
+            continue;
+        }
+        let avg = centers.iter().sum::<f64>() / centers.len() as f64;
+        let half = g.nodes[id].width as f64 / 2.0;
+        let target = if avg <= half { 0 } else { (avg - half).round() as usize };
+        layer_x[l][0] = target;
     }
     normalize_x(&mut layer_x);
 
@@ -309,6 +346,7 @@ fn align_layer(
     l: usize,
     neighbors: &[Vec<NodeId>],
     g: &Graph,
+    gap: usize,
 ) {
     let n = layers[l].len();
     if n == 0 {
@@ -320,31 +358,29 @@ fn align_layer(
         .collect();
 
     let mut new_x: Vec<usize> = vec![0; n];
-    // Forward: each node at max(target, lb_from_left)
     for i in 0..n {
         let target = targets[i].unwrap_or(layer_x[l][i]);
         let lb = if i == 0 {
             0
         } else {
             let prev_id = layers[l][i - 1];
-            new_x[i - 1] + g.nodes[prev_id].width + GAP
+            new_x[i - 1] + g.nodes[prev_id].width + gap
         };
         new_x[i] = target.max(lb);
     }
-    // Backward: pull each node leftward toward target if right neighbor allows
     for i in (0..n).rev() {
         let target = targets[i].unwrap_or(new_x[i]);
         let id = layers[l][i];
         let ub = if i == n - 1 {
             usize::MAX
         } else {
-            new_x[i + 1].saturating_sub(g.nodes[id].width + GAP)
+            new_x[i + 1].saturating_sub(g.nodes[id].width + gap)
         };
         let lb = if i == 0 {
             0
         } else {
             let prev_id = layers[l][i - 1];
-            new_x[i - 1] + g.nodes[prev_id].width + GAP
+            new_x[i - 1] + g.nodes[prev_id].width + gap
         };
         new_x[i] = target.min(ub).max(lb);
     }

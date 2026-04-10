@@ -1,4 +1,4 @@
-use crate::graph::{Direction, EdgeStyle, Graph, NodeId, Shape};
+use crate::graph::{ArrowTip, Direction, EdgeStyle, Graph, NodeId, Shape};
 use std::collections::HashMap;
 
 const RESET: &str = "\x1b[0m";
@@ -74,17 +74,6 @@ impl Theme {
             edge: Some(D),
             arrow: Some(D),
             crossing: Some(D),
-        }
-    }
-
-    pub fn by_name(name: &str) -> Option<Self> {
-        match name {
-            "none" | "plain" => Some(Self::plain()),
-            "grey" | "gray" => Some(Self::grey()),
-            "mono" => Some(Self::mono()),
-            "neon" => Some(Self::neon()),
-            "dim" => Some(Self::dim()),
-            _ => None,
         }
     }
 
@@ -193,6 +182,21 @@ impl Axes {
             Direction::TD => '▼',
             Direction::LR => '▶',
         }
+    }
+    fn back_arrow(self) -> char {
+        match self.dir {
+            Direction::TD => '▲',
+            Direction::LR => '◀',
+        }
+    }
+}
+
+fn tip_char(tip: ArrowTip, axes: Axes) -> Option<char> {
+    match tip {
+        ArrowTip::None => None,
+        ArrowTip::Arrow => Some(axes.arrow()),
+        ArrowTip::Cross => Some('×'),
+        ArrowTip::Circle => Some('○'),
     }
 }
 
@@ -332,6 +336,13 @@ pub fn render(g: &Graph, theme: &Theme) -> String {
                     Direction::TD => (sy, sx, dy, dx),
                     Direction::LR => (sx, sy, dx, dy),
                 };
+                let e = &g.edges[i];
+                // Dummy targets never get a visible tip.
+                let tip = if target.is_dummy {
+                    ArrowTip::None
+                } else {
+                    e.tip_fwd
+                };
                 draw_edge(
                     &mut canvas,
                     axes,
@@ -339,8 +350,9 @@ pub fn render(g: &Graph, theme: &Theme) -> String {
                     smn,
                     dm,
                     dmn,
-                    target.is_dummy,
-                    g.edges[i].style,
+                    tip,
+                    e.tip_back,
+                    e.style,
                 );
             }
         } else {
@@ -611,20 +623,26 @@ fn draw_edge(
     smn: usize,
     dm: usize,
     dmn: usize,
-    dst_is_dummy: bool,
+    tip_fwd: ArrowTip,
+    tip_back: bool,
     style: EdgeStyle,
 ) {
     if dm <= sm {
         return;
     }
+    let fwd_char = tip_char(tip_fwd, axes);
     if smn == dmn {
         for m in sm..dm {
             let (x, y) = axes.xy(m, smn);
             canvas.add_sides(x, y, axes.major_sides(), style, CellKind::Edge);
         }
-        if !dst_is_dummy {
+        if let Some(ch) = fwd_char {
             let (x, y) = axes.xy(dm - 1, smn);
-            canvas.set(x, y, axes.arrow(), CellKind::Arrow);
+            canvas.set(x, y, ch, CellKind::Arrow);
+        }
+        if tip_back {
+            let (x, y) = axes.xy(sm, smn);
+            canvas.set(x, y, axes.back_arrow(), CellKind::Arrow);
         }
         return;
     }
@@ -634,7 +652,6 @@ fn draw_edge(
         let (x, y) = axes.xy(m, smn);
         canvas.add_sides(x, y, axes.major_sides(), style, CellKind::Edge);
     }
-    // Source corner: connects back (toward src) + side toward dst.
     let toward_dst = if dmn > smn { axes.minor_fwd() } else { axes.minor_back() };
     let (x, y) = axes.xy(mid_m, smn);
     canvas.add_sides(x, y, axes.major_back() | toward_dst, style, CellKind::Edge);
@@ -645,7 +662,6 @@ fn draw_edge(
         canvas.add_sides(x, y, axes.minor_sides(), style, CellKind::Edge);
     }
 
-    // Target corner: connects side from src + forward (toward dst).
     let from_src = if smn < dmn { axes.minor_back() } else { axes.minor_fwd() };
     let (x, y) = axes.xy(mid_m, dmn);
     canvas.add_sides(x, y, from_src | axes.major_fwd(), style, CellKind::Edge);
@@ -655,9 +671,15 @@ fn draw_edge(
         canvas.add_sides(x, y, axes.major_sides(), style, CellKind::Edge);
     }
 
-    if !dst_is_dummy && dm > mid_m + 1 {
+    if let Some(ch) = fwd_char
+        && dm > mid_m + 1
+    {
         let (x, y) = axes.xy(dm - 1, dmn);
-        canvas.set(x, y, axes.arrow(), CellKind::Arrow);
+        canvas.set(x, y, ch, CellKind::Arrow);
+    }
+    if tip_back {
+        let (x, y) = axes.xy(sm, smn);
+        canvas.set(x, y, axes.back_arrow(), CellKind::Arrow);
     }
 }
 

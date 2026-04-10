@@ -55,12 +55,23 @@ impl EdgeStyle {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ArrowTip {
+    None,
+    #[default]
+    Arrow,
+    Cross,
+    Circle,
+}
+
 #[derive(Debug, Clone)]
 pub struct Edge {
     pub from: NodeId,
     pub to: NodeId,
     pub label: Option<String>,
     pub style: EdgeStyle,
+    pub tip_fwd: ArrowTip,
+    pub tip_back: bool,
 }
 
 #[derive(Debug, Default)]
@@ -118,12 +129,16 @@ impl Graph {
         to: NodeId,
         label: Option<String>,
         style: EdgeStyle,
+        tip_fwd: ArrowTip,
+        tip_back: bool,
     ) {
         self.edges.push(Edge {
             from,
             to,
             label,
             style,
+            tip_fwd,
+            tip_back,
         });
     }
 }

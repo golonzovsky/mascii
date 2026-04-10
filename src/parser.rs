@@ -1,4 +1,12 @@
-use crate::graph::{Direction, EdgeStyle, Graph, NodeId, Shape};
+use crate::graph::{ArrowTip as GArrowTip, Direction, EdgeStyle, Graph, NodeId, Shape};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArrowTip {
+    None,    // open link: ---
+    Arrow,   // --> / ==> / -.-> / longer
+    Cross,   // --x
+    Circle,  // --o
+}
 
 #[derive(Debug)]
 struct EdgeHit {
@@ -6,27 +14,161 @@ struct EdgeHit {
     end: usize,
     style: EdgeStyle,
     label: Option<String>,
+    // Tip at the target side ("forward" direction).
+    tip_fwd: ArrowTip,
+    // Also an arrow back at the source (for `<-->`).
+    tip_back: bool,
 }
 
-const SIMPLE_OPS: &[(&str, EdgeStyle)] = &[
-    ("-.->", EdgeStyle::Dotted),
-    ("==>", EdgeStyle::Thick),
-    ("-->", EdgeStyle::Normal),
-    ("~~~", EdgeStyle::Invisible),
-];
-
-// Labeled edge forms. Opener requires a trailing space; closer requires a
-// leading space — this disambiguates from the simple terminators.
+// Labeled forms. Opener requires trailing space; closer requires leading space.
 const LABELED_OPS: &[(&str, &str, EdgeStyle)] = &[
     ("-- ", " -->", EdgeStyle::Normal),
     ("== ", " ==>", EdgeStyle::Thick),
     ("-. ", " .->", EdgeStyle::Dotted),
 ];
 
+// Scan a single simple edge token starting at `pos` and return its span
+// plus the style + tip. Handles long forms (`-->`, `--->`, `---->`, `---`,
+// `----`, `==>`, `===`, `-.->`, `~~~`, `--x`, `--o`, `<-->`, ...).
+fn try_simple_at(s: &str, pos: usize) -> Option<EdgeHit> {
+    let bytes = s.as_bytes();
+    if pos >= bytes.len() {
+        return None;
+    }
+
+    // Dotted: -.-> (exactly four chars, handle before dash run)
+    if s[pos..].starts_with("-.->") {
+        return Some(EdgeHit {
+            start: pos,
+            end: pos + 4,
+            style: EdgeStyle::Dotted,
+            label: None,
+            tip_fwd: ArrowTip::Arrow,
+            tip_back: false,
+        });
+    }
+
+    // Bidirectional: `<-->` (or longer). Leading `<`, then a dash run, then `>`.
+    if bytes[pos] == b'<' {
+        let mut end = pos + 1;
+        while end < bytes.len() && bytes[end] == b'-' {
+            end += 1;
+        }
+        let dashes = end - pos - 1;
+        if dashes >= 2 && end < bytes.len() && bytes[end] == b'>' {
+            return Some(EdgeHit {
+                start: pos,
+                end: end + 1,
+                style: EdgeStyle::Normal,
+                label: None,
+                tip_fwd: ArrowTip::Arrow,
+                tip_back: true,
+            });
+        }
+    }
+
+    // Dash run: `---`, `-->`, `--->`, `--x`, `--o`, ...
+    if bytes[pos] == b'-' {
+        let mut end = pos;
+        while end < bytes.len() && bytes[end] == b'-' {
+            end += 1;
+        }
+        let dash_count = end - pos;
+        if dash_count >= 2 && end < bytes.len() {
+            match bytes[end] {
+                b'>' => {
+                    return Some(EdgeHit {
+                        start: pos,
+                        end: end + 1,
+                        style: EdgeStyle::Normal,
+                        label: None,
+                        tip_fwd: ArrowTip::Arrow,
+                        tip_back: false,
+                    });
+                }
+                b'x' => {
+                    return Some(EdgeHit {
+                        start: pos,
+                        end: end + 1,
+                        style: EdgeStyle::Normal,
+                        label: None,
+                        tip_fwd: ArrowTip::Cross,
+                        tip_back: false,
+                    });
+                }
+                b'o' => {
+                    return Some(EdgeHit {
+                        start: pos,
+                        end: end + 1,
+                        style: EdgeStyle::Normal,
+                        label: None,
+                        tip_fwd: ArrowTip::Circle,
+                        tip_back: false,
+                    });
+                }
+                _ => {}
+            }
+        }
+        if dash_count >= 3 {
+            return Some(EdgeHit {
+                start: pos,
+                end,
+                style: EdgeStyle::Normal,
+                label: None,
+                tip_fwd: ArrowTip::None,
+                tip_back: false,
+            });
+        }
+    }
+
+    // Equals run: `==>`, `===`
+    if bytes[pos] == b'=' {
+        let mut end = pos;
+        while end < bytes.len() && bytes[end] == b'=' {
+            end += 1;
+        }
+        let eq_count = end - pos;
+        if eq_count >= 2 && end < bytes.len() && bytes[end] == b'>' {
+            return Some(EdgeHit {
+                start: pos,
+                end: end + 1,
+                style: EdgeStyle::Thick,
+                label: None,
+                tip_fwd: ArrowTip::Arrow,
+                tip_back: false,
+            });
+        }
+        if eq_count >= 3 {
+            return Some(EdgeHit {
+                start: pos,
+                end,
+                style: EdgeStyle::Thick,
+                label: None,
+                tip_fwd: ArrowTip::None,
+                tip_back: false,
+            });
+        }
+    }
+
+    // Invisible: ~~~
+    if s[pos..].starts_with("~~~") {
+        return Some(EdgeHit {
+            start: pos,
+            end: pos + 3,
+            style: EdgeStyle::Invisible,
+            label: None,
+            tip_fwd: ArrowTip::None,
+            tip_back: false,
+        });
+    }
+
+    None
+}
+
 fn find_edge_op(s: &str, from: usize) -> Option<EdgeHit> {
     let mut best: Option<EdgeHit> = None;
 
-    // Labeled forms first (they subsume simple terminators when present).
+    // Labeled forms first.
     for &(open, close, style) in LABELED_OPS {
         if let Some(open_rel) = s[from..].find(open) {
             let open_start = from + open_rel;
@@ -35,8 +177,6 @@ fn find_edge_op(s: &str, from: usize) -> Option<EdgeHit> {
                 let close_start = open_end + close_rel;
                 let close_end = close_start + close.len();
                 let text = s[open_end..close_start].trim();
-                // Reject if the text itself contains another edge terminator —
-                // that means we matched across two edges.
                 if !text.is_empty()
                     && !text.contains("-->")
                     && !text.contains("==>")
@@ -47,6 +187,8 @@ fn find_edge_op(s: &str, from: usize) -> Option<EdgeHit> {
                         end: close_end,
                         style,
                         label: Some(text.to_string()),
+                        tip_fwd: ArrowTip::Arrow,
+                        tip_back: false,
                     };
                     if best.as_ref().is_none_or(|b| hit.start < b.start) {
                         best = Some(hit);
@@ -56,20 +198,14 @@ fn find_edge_op(s: &str, from: usize) -> Option<EdgeHit> {
         }
     }
 
-    // Simple terminators
-    for &(op, style) in SIMPLE_OPS {
-        if let Some(rel) = s[from..].find(op) {
-            let start = from + rel;
-            let end = start + op.len();
-            let hit = EdgeHit {
-                start,
-                end,
-                style,
-                label: None,
-            };
+    // Simple forms: scan char boundaries for the earliest match.
+    for (p, _) in s[from..].char_indices() {
+        let pos = from + p;
+        if let Some(hit) = try_simple_at(s, pos) {
             if best.as_ref().is_none_or(|b| hit.start < b.start) {
                 best = Some(hit);
             }
+            break;
         }
     }
 
@@ -115,8 +251,7 @@ pub fn parse(source: &str) -> Result<Graph, String> {
 }
 
 fn parse_edge_line(g: &mut Graph, line: &str) -> Result<(), String> {
-    // Walk the line, splitting at any edge operator. Record both the node
-    // segments and the edge hit (style + optional embedded label).
+    // Split into segments by edge operator.
     let mut segments: Vec<&str> = Vec::new();
     let mut hits: Vec<EdgeHit> = Vec::new();
     let mut cursor = 0;
@@ -137,10 +272,13 @@ fn parse_edge_line(g: &mut Graph, line: &str) -> Result<(), String> {
         return Err(format!("bad edge: {}", line));
     }
 
-    let mut prev_id: Option<NodeId> = None;
+    // Each segment is an `&`-separated group of nodes. Parse each group into
+    // a Vec<NodeId>, then emit edges as the cross product between each
+    // consecutive pair of groups.
+    let mut groups: Vec<Vec<NodeId>> = Vec::with_capacity(segments.len());
+    let mut pipe_labels: Vec<Option<String>> = Vec::with_capacity(segments.len());
     for (idx, raw) in segments.iter().enumerate() {
         let mut p = raw.trim();
-        // Pipe-form edge label `|text|` prefixes the target of the previous edge.
         let mut pipe_label: Option<String> = None;
         if idx > 0
             && p.starts_with('|')
@@ -155,15 +293,35 @@ fn parse_edge_line(g: &mut Graph, line: &str) -> Result<(), String> {
         if p.is_empty() {
             return Err(format!("empty endpoint in edge: {}", line));
         }
-        let (name, label, shape) = parse_ident_label(p)?;
-        let id = g.add_node(&name, &label, shape);
-        if let Some(pi) = prev_id {
-            let hit = &hits[idx - 1];
-            // Pipe form wins over embedded form if both somehow appear.
-            let edge_label = pipe_label.or_else(|| hit.label.clone());
-            g.add_edge(pi, id, edge_label, hit.style);
+        let mut group: Vec<NodeId> = Vec::new();
+        for part in p.split('&') {
+            let part = part.trim();
+            if part.is_empty() {
+                return Err(format!("empty endpoint in edge: {}", line));
+            }
+            let (name, label, shape) = parse_ident_label(part)?;
+            group.push(g.add_node(&name, &label, shape));
         }
-        prev_id = Some(id);
+        groups.push(group);
+        pipe_labels.push(pipe_label);
+    }
+
+    for i in 1..groups.len() {
+        let hit = &hits[i - 1];
+        let edge_label = pipe_labels[i].clone().or_else(|| hit.label.clone());
+        let tip_fwd = match hit.tip_fwd {
+            ArrowTip::None => GArrowTip::None,
+            ArrowTip::Arrow => GArrowTip::Arrow,
+            ArrowTip::Cross => GArrowTip::Cross,
+            ArrowTip::Circle => GArrowTip::Circle,
+        };
+        let left = groups[i - 1].clone();
+        let right = groups[i].clone();
+        for &from in &left {
+            for &to in &right {
+                g.add_edge(from, to, edge_label.clone(), hit.style, tip_fwd, hit.tip_back);
+            }
+        }
     }
     Ok(())
 }
