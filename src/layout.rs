@@ -1,15 +1,35 @@
-use crate::graph::{Edge, Graph, Node, NodeId, Shape};
+use crate::graph::{Direction, Edge, Graph, Node, NodeId, Shape};
 
 const GAP: usize = 4;
 const CHANNEL: usize = 3;
+// LR-only: horizontal `─` padding on each side of an inline edge label.
+pub const LR_LABEL_PAD: usize = 2;
 
 pub fn layout(mut g: Graph, padding: usize) -> Graph {
     compute_node_dims(&mut g, padding);
     assign_layers(&mut g);
     insert_dummies(&mut g);
     order_layers(&mut g, 8);
+
+    // LR trick: swap each node's (width, height) so the TD positioning code
+    // — which stacks layers along y using heights and aligns within layer
+    // along x using widths — effectively stacks along the horizontal axis
+    // using visual widths. After positioning, we swap (x, y) and restore
+    // dimensions to their original values.
+    let lr = g.dir == Direction::LR;
+    if lr {
+        for n in &mut g.nodes {
+            std::mem::swap(&mut n.width, &mut n.height);
+        }
+    }
     assign_x(&mut g);
     assign_y(&mut g);
+    if lr {
+        for n in &mut g.nodes {
+            std::mem::swap(&mut n.x, &mut n.y);
+            std::mem::swap(&mut n.width, &mut n.height);
+        }
+    }
     g
 }
 
@@ -377,15 +397,29 @@ fn assign_y(g: &mut Graph) {
         }
     }
 
-    // Compute channel heights: add a row when any edge leaving this layer
-    // carries a label, so the label has its own row in the channel.
+    // Compute channel heights.
+    // In TD the channel is vertical — we bump by one row when any edge in
+    // the channel carries a label (the label gets its own row).
+    // In LR we're still running the TD algorithm (with swapped dims), but
+    // that produces an LR horizontal channel after the post-layout swap.
+    // Labels in LR need enough channel width to fit the text inline, so
+    // bump the channel by max label length + 2 spaces of breathing room.
     let mut channel_heights: Vec<usize> = vec![CHANNEL; max_layer];
+    let lr = g.dir == Direction::LR;
     for e in &g.edges {
-        if e.label.is_some() {
-            let l = g.nodes[e.from].layer;
-            if l < max_layer {
-                channel_heights[l] = channel_heights[l].max(CHANNEL + 1);
+        let Some(text) = e.label.as_ref() else { continue };
+        let l = g.nodes[e.from].layer;
+        if l >= max_layer {
+            continue;
+        }
+        if lr {
+            // Channel must fit: [pad `─`][label][pad `─`][`▶`]
+            let needed = text.chars().count() + 2 * LR_LABEL_PAD + 1;
+            if needed > channel_heights[l] {
+                channel_heights[l] = needed;
             }
+        } else {
+            channel_heights[l] = channel_heights[l].max(CHANNEL + 1);
         }
     }
 

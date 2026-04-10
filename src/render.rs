@@ -1,4 +1,4 @@
-use crate::graph::{EdgeStyle, Graph, NodeId, Shape};
+use crate::graph::{Direction, EdgeStyle, Graph, NodeId, Shape};
 use std::collections::HashMap;
 
 const RESET: &str = "\x1b[0m";
@@ -195,6 +195,34 @@ impl Canvas {
         }
         // else: leave existing character
     }
+
+    // Merge a new corner onto an existing cell. Two corners sharing a side
+    // collapse into a tap (`┤`, `├`, `┬`, `┴`) and two opposite corners into
+    // a cross. Used for fan-out/fan-in where multiple edges share a turn.
+    fn set_corner(&mut self, x: usize, y: usize, ch: char, kind: CellKind) {
+        let cur = self.get_char(x, y);
+        if cur == ' ' || cur == '─' || cur == '│' || cur == '━' || cur == '┃'
+            || cur == '┄' || cur == '┊'
+        {
+            self.set(x, y, ch, kind);
+            return;
+        }
+        let merged = match (cur, ch) {
+            // Up-left corner + up-right corner → tap up (two verticals meet on bottom)
+            ('╯', '╰') | ('╰', '╯') => Some('┴'),
+            // Down-left corner + down-right corner → tap down
+            ('╭', '╮') | ('╮', '╭') => Some('┬'),
+            // Two vertical corners sharing "vertical-above" and "vertical-below" on left
+            ('╯', '╮') | ('╮', '╯') => Some('┤'),
+            ('╰', '╭') | ('╭', '╰') => Some('├'),
+            _ => None,
+        };
+        if let Some(m) = merged {
+            self.set(x, y, m, kind);
+        } else {
+            self.set(x, y, ch, kind);
+        }
+    }
 }
 
 pub fn render(g: &Graph, theme: &Theme) -> String {
@@ -223,9 +251,8 @@ pub fn render(g: &Graph, theme: &Theme) -> String {
         draw_box(&mut canvas, n.x, n.y, n.width, n.height, &n.label_lines, n.shape);
     }
 
-    // Dummies (vertical pass-throughs) — use the style of the edge that
-    // enters the dummy, falling back to Normal. Invisible dummies render
-    // as blank columns.
+    // Dummies (pass-throughs) — use the style of the edge that enters the
+    // dummy, falling back to Normal. Invisible dummies render as blank.
     for n in &g.nodes {
         if !n.is_dummy {
             continue;
@@ -240,8 +267,17 @@ pub fn render(g: &Graph, theme: &Theme) -> String {
             continue;
         }
         let gl = glyphs_for(incoming_style);
-        for dy in 0..n.height {
-            canvas.set(n.x, n.y + dy, gl.vert, CellKind::Edge);
+        match g.dir {
+            Direction::TD => {
+                for d in 0..n.height {
+                    canvas.set(n.x, n.y + d, gl.vert, CellKind::Edge);
+                }
+            }
+            Direction::LR => {
+                for d in 0..n.width {
+                    canvas.set(n.x + d, n.y, gl.horiz, CellKind::Edge);
+                }
+            }
         }
     }
 
@@ -258,7 +294,6 @@ pub fn render(g: &Graph, theme: &Theme) -> String {
     for tid in targets {
         let edges = &by_target[&tid];
         let target = &g.nodes[tid];
-        // Invisible edges contribute only to layout; skip rendering.
         let visible: Vec<usize> = edges
             .iter()
             .copied()
@@ -270,35 +305,52 @@ pub fn render(g: &Graph, theme: &Theme) -> String {
         if visible.len() == 1 || target.is_dummy {
             for i in visible {
                 let (sx, sy, dx, dy) = endpoints[&i];
-                draw_edge(
-                    &mut canvas,
-                    sx,
-                    sy,
-                    dx,
-                    dy,
-                    target.is_dummy,
-                    g.edges[i].style,
-                );
+                match g.dir {
+                    Direction::TD => draw_edge_td(
+                        &mut canvas,
+                        sx,
+                        sy,
+                        dx,
+                        dy,
+                        target.is_dummy,
+                        g.edges[i].style,
+                    ),
+                    Direction::LR => draw_edge_lr(
+                        &mut canvas,
+                        sx,
+                        sy,
+                        dx,
+                        dy,
+                        target.is_dummy,
+                        g.edges[i].style,
+                    ),
+                }
             }
         } else {
-            draw_merge(&mut canvas, g, tid, &visible);
+            match g.dir {
+                Direction::TD => draw_merge_td(&mut canvas, g, tid, &visible),
+                Direction::LR => draw_merge_lr(&mut canvas, g, tid, &visible),
+            }
         }
     }
 
-    // Edge labels — placed beside the exit column in the channel below source.
+    // Edge labels
     for (i, e) in g.edges.iter().enumerate() {
         let Some(text) = e.label.as_deref() else { continue };
         if text.is_empty() {
             continue;
         }
         let (sx, sy, _dx, _dy) = endpoints[&i];
-        place_edge_label(&mut canvas, sx, sy, text);
+        match g.dir {
+            Direction::TD => place_edge_label_td(&mut canvas, sx, sy, text),
+            Direction::LR => place_edge_label_lr(&mut canvas, sx, sy, text),
+        }
     }
 
     emit(&canvas, theme)
 }
 
-fn place_edge_label(canvas: &mut Canvas, sx: usize, sy: usize, text: &str) {
+fn place_edge_label_td(canvas: &mut Canvas, sx: usize, sy: usize, text: &str) {
     // Inline placement: center label on the edge column, breaking the `│`
     // drop at that row. Only write over space or `│` cells, so we don't
     // clobber a neighbour's line art.
@@ -401,35 +453,63 @@ fn draw_box(
     }
 }
 
-fn inner_range(n: &crate::graph::Node) -> (usize, usize) {
+// Inner range along the minor (cross) axis for a node.
+// TD minor = x, LR minor = y.
+fn inner_range(n: &crate::graph::Node, dir: Direction) -> (usize, usize) {
     if n.is_dummy {
-        (n.x, n.x)
-    } else if n.width >= 3 {
-        (n.x + 1, n.x + n.width - 2)
+        match dir {
+            Direction::TD => (n.x, n.x),
+            Direction::LR => (n.y, n.y),
+        }
     } else {
-        (n.x, n.x + n.width.saturating_sub(1))
+        match dir {
+            Direction::TD => {
+                if n.width >= 3 {
+                    (n.x + 1, n.x + n.width - 2)
+                } else {
+                    (n.x, n.x + n.width.saturating_sub(1))
+                }
+            }
+            Direction::LR => {
+                if n.height >= 3 {
+                    (n.y + 1, n.y + n.height - 2)
+                } else {
+                    (n.y, n.y + n.height.saturating_sub(1))
+                }
+            }
+        }
     }
 }
 
-fn preferred_endpoints(src: &crate::graph::Node, dst: &crate::graph::Node) -> (usize, usize) {
-    let (slo, shi) = inner_range(src);
-    let (dlo, dhi) = inner_range(dst);
+fn minor_center(n: &crate::graph::Node, dir: Direction) -> usize {
+    match dir {
+        Direction::TD => n.x + n.width / 2,
+        Direction::LR => n.y + n.height / 2,
+    }
+}
+
+fn preferred_endpoints(
+    src: &crate::graph::Node,
+    dst: &crate::graph::Node,
+    dir: Direction,
+) -> (usize, usize) {
+    let (slo, shi) = inner_range(src, dir);
+    let (dlo, dhi) = inner_range(dst, dir);
     let overlap_lo = slo.max(dlo);
     let overlap_hi = shi.min(dhi);
     if overlap_lo <= overlap_hi {
         let mid = (overlap_lo + overlap_hi) / 2;
         (mid, mid)
     } else {
-        let src_center = src.x + src.width / 2;
-        let dst_center = dst.x + dst.width / 2;
         (
-            clamp(dst_center, slo, shi),
-            clamp(src_center, dlo, dhi),
+            clamp(minor_center(dst, dir), slo, shi),
+            clamp(minor_center(src, dir), dlo, dhi),
         )
     }
 }
 
 fn compute_endpoints(g: &Graph) -> HashMap<usize, (usize, usize, usize, usize)> {
+    let dir = g.dir;
     let mut out_by_node: HashMap<NodeId, Vec<usize>> = HashMap::new();
     let mut in_by_node: HashMap<NodeId, Vec<usize>> = HashMap::new();
     for (i, e) in g.edges.iter().enumerate() {
@@ -437,48 +517,44 @@ fn compute_endpoints(g: &Graph) -> HashMap<usize, (usize, usize, usize, usize)> 
         in_by_node.entry(e.to).or_default().push(i);
     }
 
-    // Initial preferred per-edge endpoints
-    let mut exit_x: HashMap<usize, usize> = HashMap::new();
-    let mut entry_x: HashMap<usize, usize> = HashMap::new();
+    // `exit_minor`/`entry_minor` are positions on the MINOR axis:
+    //   TD: minor = x (column along the box bottom/top)
+    //   LR: minor = y (row along the box right/left)
+    let mut exit_minor: HashMap<usize, usize> = HashMap::new();
+    let mut entry_minor: HashMap<usize, usize> = HashMap::new();
     for (i, e) in g.edges.iter().enumerate() {
-        let (ex, en) = preferred_endpoints(&g.nodes[e.from], &g.nodes[e.to]);
-        exit_x.insert(i, ex);
-        entry_x.insert(i, en);
+        let (ex, en) = preferred_endpoints(&g.nodes[e.from], &g.nodes[e.to], dir);
+        exit_minor.insert(i, ex);
+        entry_minor.insert(i, en);
     }
 
-    // Spread out-edges with collisions on the source bottom
+    // Spread out-edges with collisions on the source's minor axis
     for (&node_id, edges) in &out_by_node {
         if edges.len() < 2 {
             continue;
         }
         let node = &g.nodes[node_id];
-        let (lo, hi) = inner_range(node);
+        let (lo, hi) = inner_range(node, dir);
         let mut sorted = edges.clone();
-        sorted.sort_by_key(|&ei| {
-            let t = &g.nodes[g.edges[ei].to];
-            t.x + t.width / 2
-        });
-        let mut ports: Vec<usize> = sorted.iter().map(|ei| exit_x[ei]).collect();
-        // Forward: enforce strictly increasing
+        sorted.sort_by_key(|&ei| minor_center(&g.nodes[g.edges[ei].to], dir));
+        let mut ports: Vec<usize> = sorted.iter().map(|ei| exit_minor[ei]).collect();
         for i in 1..ports.len() {
             if ports[i] <= ports[i - 1] {
                 ports[i] = ports[i - 1] + 1;
             }
         }
-        // Clamp to range
         for p in ports.iter_mut() {
             if *p > hi {
                 *p = hi;
             }
         }
-        // Backward fix-up if clamping broke order
         for i in (1..ports.len()).rev() {
             if ports[i] <= ports[i - 1] && ports[i - 1] > lo {
                 ports[i - 1] = ports[i].saturating_sub(1).max(lo);
             }
         }
         for (i, ei) in sorted.iter().enumerate() {
-            exit_x.insert(*ei, ports[i]);
+            exit_minor.insert(*ei, ports[i]);
         }
     }
 
@@ -488,13 +564,10 @@ fn compute_endpoints(g: &Graph) -> HashMap<usize, (usize, usize, usize, usize)> 
             continue;
         }
         let node = &g.nodes[node_id];
-        let (lo, hi) = inner_range(node);
+        let (lo, hi) = inner_range(node, dir);
         let mut sorted = edges.clone();
-        sorted.sort_by_key(|&ei| {
-            let s = &g.nodes[g.edges[ei].from];
-            s.x + s.width / 2
-        });
-        let mut ports: Vec<usize> = sorted.iter().map(|ei| entry_x[ei]).collect();
+        sorted.sort_by_key(|&ei| minor_center(&g.nodes[g.edges[ei].from], dir));
+        let mut ports: Vec<usize> = sorted.iter().map(|ei| entry_minor[ei]).collect();
         for i in 1..ports.len() {
             if ports[i] <= ports[i - 1] {
                 ports[i] = ports[i - 1] + 1;
@@ -511,7 +584,7 @@ fn compute_endpoints(g: &Graph) -> HashMap<usize, (usize, usize, usize, usize)> 
             }
         }
         for (i, ei) in sorted.iter().enumerate() {
-            entry_x.insert(*ei, ports[i]);
+            entry_minor.insert(*ei, ports[i]);
         }
     }
 
@@ -519,11 +592,13 @@ fn compute_endpoints(g: &Graph) -> HashMap<usize, (usize, usize, usize, usize)> 
     for (i, _e) in g.edges.iter().enumerate() {
         let src = &g.nodes[g.edges[i].from];
         let dst = &g.nodes[g.edges[i].to];
-        let sx = *exit_x.get(&i).unwrap();
-        let sy = src.y + src.height;
-        let ex = *entry_x.get(&i).unwrap();
-        let ey = dst.y;
-        result.insert(i, (sx, sy, ex, ey));
+        let s_minor = *exit_minor.get(&i).unwrap();
+        let e_minor = *entry_minor.get(&i).unwrap();
+        let (sx, sy, dx, dy) = match dir {
+            Direction::TD => (s_minor, src.y + src.height, e_minor, dst.y),
+            Direction::LR => (src.x + src.width, s_minor, dst.x, e_minor),
+        };
+        result.insert(i, (sx, sy, dx, dy));
     }
     result
 }
@@ -538,7 +613,143 @@ fn clamp(v: usize, lo: usize, hi: usize) -> usize {
     }
 }
 
-fn draw_merge(canvas: &mut Canvas, g: &Graph, target_id: NodeId, edge_ids: &[usize]) {
+// LR merge: sources on the left flow into a target on the right. The "bar"
+// is a vertical segment gathering all source y-positions, then a single
+// horizontal drop to the target's entry point.
+fn draw_merge_lr(canvas: &mut Canvas, g: &Graph, target_id: NodeId, edge_ids: &[usize]) {
+    let dst = &g.nodes[target_id];
+    let dy = dst.y + dst.height / 2;
+    let dx = dst.x;
+
+    let style = if edge_ids.iter().any(|&i| g.edges[i].style == EdgeStyle::Thick) {
+        EdgeStyle::Thick
+    } else if edge_ids
+        .iter()
+        .any(|&i| g.edges[i].style == EdgeStyle::Dotted)
+    {
+        EdgeStyle::Dotted
+    } else {
+        EdgeStyle::Normal
+    };
+    let gl = glyphs_for(style);
+
+    // Source points: (exit_x = src.x+width, exit_y = src center row)
+    let mut srcs: Vec<(usize, usize)> = edge_ids
+        .iter()
+        .map(|&ei| {
+            let s = &g.nodes[g.edges[ei].from];
+            (s.x + s.width, s.y + s.height / 2)
+        })
+        .collect();
+    srcs.sort_by_key(|&(_, y)| y);
+    srcs.dedup();
+
+    let max_sx = srcs.iter().map(|&(sx, _)| sx).max().unwrap();
+    let mid_x = if dx > max_sx + 1 {
+        max_sx + (dx - max_sx) / 2
+    } else {
+        max_sx
+    };
+
+    // Horizontal runs from each source to mid_x
+    for &(sx, sy) in &srcs {
+        for x in sx..mid_x {
+            canvas.set_overlay(x, sy, gl.horiz, CellKind::Edge);
+        }
+    }
+
+    let topmost_src = srcs.first().unwrap().1;
+    let bottommost_src = srcs.last().unwrap().1;
+    let bar_lo = topmost_src.min(dy);
+    let bar_hi = bottommost_src.max(dy);
+
+    // Vertical bar
+    for y in bar_lo..=bar_hi {
+        canvas.set_overlay(mid_x, y, gl.vert, CellKind::Edge);
+    }
+
+    // Source sites on the bar (horizontal enters from left).
+    //   bar_lo (top):       ╮  (horizontal-left + vertical-below)
+    //   bar_hi (bottom):    ╯  (horizontal-left + vertical-above)
+    //   intermediate:       ┤  (horizontal-left + vertical-both)
+    for &(_, sy) in &srcs {
+        let ch = if sy == bar_lo {
+            gl.corner_ul // ╮
+        } else if sy == bar_hi {
+            gl.corner_dr // ╯
+        } else {
+            '┤'
+        };
+        canvas.set(mid_x, sy, ch, CellKind::Edge);
+    }
+
+    // Target site on the bar (horizontal extends right to the target).
+    //   bar_lo (top):       ╭  (horizontal-right + vertical-below)
+    //   bar_hi (bottom):    ╰  (horizontal-right + vertical-above)
+    //   intermediate:       ├  (horizontal-right + vertical-both)
+    let target_ch = if dy == bar_lo && dy != topmost_src {
+        Some(gl.corner_ur)
+    } else if dy == bar_hi && dy != bottommost_src {
+        Some(gl.corner_dl)
+    } else if dy >= bar_lo && dy <= bar_hi && srcs.iter().all(|&(_, sy)| sy != dy) {
+        Some('├')
+    } else {
+        None
+    };
+    if let Some(ch) = target_ch {
+        canvas.set(mid_x, dy, ch, CellKind::Edge);
+    }
+
+    // Drop from bar to target
+    for x in (mid_x + 1)..dx {
+        canvas.set_overlay(x, dy, gl.horiz, CellKind::Edge);
+    }
+    if dx > mid_x + 1 {
+        canvas.set(dx - 1, dy, '▶', CellKind::Arrow);
+    } else if dx == mid_x + 1 {
+        canvas.set(mid_x, dy, '▶', CellKind::Arrow);
+    }
+}
+
+fn place_edge_label_lr(canvas: &mut Canvas, sx: usize, sy: usize, text: &str) {
+    // Inline placement on the horizontal drop. Layout already widened the
+    // channel for us to fit: `─` * PAD + label + `─` * PAD + `▶`. Place the
+    // label leaving LR_LABEL_PAD horizontal line chars on each side.
+    if sy >= canvas.chars.len() {
+        return;
+    }
+    let row = &canvas.chars[sy];
+    let len = text.chars().count();
+    if len == 0 {
+        return;
+    }
+    // Walk right from sx over horizontal-line / space cells to find the run.
+    let mut run_end = sx;
+    while run_end < row.len() && matches!(row[run_end], '─' | '━' | '┄' | ' ') {
+        run_end += 1;
+    }
+    let run_len = run_end - sx;
+    let pad = crate::layout::LR_LABEL_PAD;
+    // Need at minimum: pad + len + pad chars of run before any non-run char.
+    if run_len < len + 2 * pad {
+        return;
+    }
+    // Center the label within the run, but never closer than `pad` to the
+    // start.
+    let extra = run_len - len - 2 * pad;
+    let start = sx + pad + extra / 2;
+    for k in 0..len {
+        let c = row[start + k];
+        if c != ' ' && c != '─' && c != '━' && c != '┄' {
+            return;
+        }
+    }
+    for (k, ch) in text.chars().enumerate() {
+        canvas.set(start + k, sy, ch, CellKind::Label);
+    }
+}
+
+fn draw_merge_td(canvas: &mut Canvas, g: &Graph, target_id: NodeId, edge_ids: &[usize]) {
     let dst = &g.nodes[target_id];
     let dx = dst.x + dst.width / 2;
     let dy = dst.y;
@@ -623,7 +834,7 @@ fn draw_merge(canvas: &mut Canvas, g: &Graph, target_id: NodeId, edge_ids: &[usi
     }
 }
 
-fn draw_edge(
+fn draw_edge_td(
     canvas: &mut Canvas,
     sx: usize,
     sy: usize,
@@ -665,5 +876,53 @@ fn draw_edge(
     }
     if !dst_is_dummy && dy > mid_y + 1 {
         canvas.set(dx, dy - 1, '▼', CellKind::Arrow);
+    }
+}
+
+// LR variant: edges flow left-to-right. sx/sy = exit point (just right of
+// source box), dx/dy = entry point (just left of target). The "channel" is
+// horizontal space between source's right edge and target's left edge.
+fn draw_edge_lr(
+    canvas: &mut Canvas,
+    sx: usize,
+    sy: usize,
+    dx: usize,
+    dy: usize,
+    dst_is_dummy: bool,
+    style: EdgeStyle,
+) {
+    if dx <= sx {
+        return;
+    }
+    let gl = glyphs_for(style);
+    if sy == dy {
+        for x in sx..dx {
+            canvas.set_overlay(x, sy, gl.horiz, CellKind::Edge);
+        }
+        if !dst_is_dummy {
+            canvas.set(dx - 1, sy, '▶', CellKind::Arrow);
+        }
+        return;
+    }
+    let mid_x = (sx + dx) / 2;
+    for x in sx..mid_x {
+        canvas.set_overlay(x, sy, gl.horiz, CellKind::Edge);
+    }
+    let (lo, hi) = if sy < dy { (sy, dy) } else { (dy, sy) };
+    for y in (lo + 1)..hi {
+        canvas.set_overlay(mid_x, y, gl.vert, CellKind::Edge);
+    }
+    if sy < dy {
+        canvas.set_corner(mid_x, sy, gl.corner_ul, CellKind::Edge); // ╮
+        canvas.set_corner(mid_x, dy, gl.corner_dl, CellKind::Edge); // ╰
+    } else {
+        canvas.set_corner(mid_x, sy, gl.corner_dr, CellKind::Edge); // ╯
+        canvas.set_corner(mid_x, dy, gl.corner_ur, CellKind::Edge); // ╭
+    }
+    for x in (mid_x + 1)..dx {
+        canvas.set_overlay(x, dy, gl.horiz, CellKind::Edge);
+    }
+    if !dst_is_dummy && dx > mid_x + 1 {
+        canvas.set(dx - 1, dy, '▶', CellKind::Arrow);
     }
 }

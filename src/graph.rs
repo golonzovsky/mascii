@@ -3,6 +3,18 @@ use std::collections::HashMap;
 pub type NodeId = usize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    TD, // top-down (default); TB is an alias
+    LR, // left-right
+}
+
+impl Default for Direction {
+    fn default() -> Self {
+        Direction::TD
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shape {
     Round,  // (...) and {...} and bare identifiers
     Square, // [...]
@@ -56,6 +68,7 @@ pub struct Graph {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
     pub name_to_id: HashMap<String, NodeId>,
+    pub dir: Direction,
 }
 
 impl Graph {

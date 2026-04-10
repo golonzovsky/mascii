@@ -1,24 +1,78 @@
-use crate::graph::{EdgeStyle, Graph, NodeId, Shape};
+use crate::graph::{Direction, EdgeStyle, Graph, NodeId, Shape};
 
-const EDGE_OPS: &[(&str, EdgeStyle)] = &[
+#[derive(Debug)]
+struct EdgeHit {
+    start: usize,
+    end: usize,
+    style: EdgeStyle,
+    label: Option<String>,
+}
+
+const SIMPLE_OPS: &[(&str, EdgeStyle)] = &[
     ("-.->", EdgeStyle::Dotted),
     ("==>", EdgeStyle::Thick),
     ("-->", EdgeStyle::Normal),
     ("~~~", EdgeStyle::Invisible),
 ];
 
-fn find_edge_op(s: &str, from: usize) -> Option<(usize, usize, EdgeStyle)> {
-    let mut best: Option<(usize, usize, EdgeStyle)> = None;
-    for &(op, style) in EDGE_OPS {
-        if let Some(pos) = s[from..].find(op) {
-            let start = from + pos;
-            let end = start + op.len();
-            match best {
-                Some((bs, _, _)) if bs <= start => {}
-                _ => best = Some((start, end, style)),
+// Labeled edge forms. Opener requires a trailing space; closer requires a
+// leading space — this disambiguates from the simple terminators.
+const LABELED_OPS: &[(&str, &str, EdgeStyle)] = &[
+    ("-- ", " -->", EdgeStyle::Normal),
+    ("== ", " ==>", EdgeStyle::Thick),
+    ("-. ", " .->", EdgeStyle::Dotted),
+];
+
+fn find_edge_op(s: &str, from: usize) -> Option<EdgeHit> {
+    let mut best: Option<EdgeHit> = None;
+
+    // Labeled forms first (they subsume simple terminators when present).
+    for &(open, close, style) in LABELED_OPS {
+        if let Some(open_rel) = s[from..].find(open) {
+            let open_start = from + open_rel;
+            let open_end = open_start + open.len();
+            if let Some(close_rel) = s[open_end..].find(close) {
+                let close_start = open_end + close_rel;
+                let close_end = close_start + close.len();
+                let text = s[open_end..close_start].trim();
+                // Reject if the text itself contains another edge terminator —
+                // that means we matched across two edges.
+                if !text.is_empty()
+                    && !text.contains("-->")
+                    && !text.contains("==>")
+                    && !text.contains(".->")
+                {
+                    let hit = EdgeHit {
+                        start: open_start,
+                        end: close_end,
+                        style,
+                        label: Some(text.to_string()),
+                    };
+                    if best.as_ref().is_none_or(|b| hit.start < b.start) {
+                        best = Some(hit);
+                    }
+                }
             }
         }
     }
+
+    // Simple terminators
+    for &(op, style) in SIMPLE_OPS {
+        if let Some(rel) = s[from..].find(op) {
+            let start = from + rel;
+            let end = start + op.len();
+            let hit = EdgeHit {
+                start,
+                end,
+                style,
+                label: None,
+            };
+            if best.as_ref().is_none_or(|b| hit.start < b.start) {
+                best = Some(hit);
+            }
+        }
+    }
+
     best
 }
 
@@ -36,7 +90,16 @@ pub fn parse(source: &str) -> Result<Graph, String> {
         if line.starts_with("%%") {
             continue;
         }
-        if line.starts_with("flowchart") || line.starts_with("graph") {
+        if let Some(rest) = line
+            .strip_prefix("flowchart")
+            .or_else(|| line.strip_prefix("graph"))
+        {
+            let rest = rest.trim();
+            if rest.eq_ignore_ascii_case("LR") || rest.eq_ignore_ascii_case("RL") {
+                g.dir = Direction::LR;
+            } else {
+                g.dir = Direction::TD;
+            }
             continue;
         }
 
@@ -61,16 +124,16 @@ fn parse_node_decl(g: &mut Graph, line: &str) -> Result<NodeId, String> {
 
 fn parse_edge_line(g: &mut Graph, line: &str) -> Result<(), String> {
     // Walk the line, splitting at any edge operator. Record both the node
-    // segments and the style of the operator that separates each pair.
+    // segments and the edge hit (style + optional embedded label).
     let mut segments: Vec<&str> = Vec::new();
-    let mut styles: Vec<EdgeStyle> = Vec::new();
+    let mut hits: Vec<EdgeHit> = Vec::new();
     let mut cursor = 0;
     loop {
         match find_edge_op(line, cursor) {
-            Some((start, end, style)) => {
-                segments.push(&line[cursor..start]);
-                styles.push(style);
-                cursor = end;
+            Some(hit) => {
+                segments.push(&line[cursor..hit.start]);
+                cursor = hit.end;
+                hits.push(hit);
             }
             None => {
                 segments.push(&line[cursor..]);
@@ -85,13 +148,13 @@ fn parse_edge_line(g: &mut Graph, line: &str) -> Result<(), String> {
     let mut prev_id: Option<NodeId> = None;
     for (idx, raw) in segments.iter().enumerate() {
         let mut p = raw.trim();
-        // Edge label `|text|` prefixes the target of the previous edge.
-        let mut edge_label: Option<String> = None;
+        // Pipe-form edge label `|text|` prefixes the target of the previous edge.
+        let mut pipe_label: Option<String> = None;
         if idx > 0 && p.starts_with('|') {
             if let Some(end) = p[1..].find('|') {
                 let lbl = p[1..1 + end].trim().to_string();
                 if !lbl.is_empty() {
-                    edge_label = Some(lbl);
+                    pipe_label = Some(lbl);
                 }
                 p = p[end + 2..].trim();
             }
@@ -102,8 +165,10 @@ fn parse_edge_line(g: &mut Graph, line: &str) -> Result<(), String> {
         let (name, label, shape) = parse_ident_label(p)?;
         let id = g.add_node(&name, &label, shape);
         if let Some(pi) = prev_id {
-            let style = styles[idx - 1];
-            g.add_edge(pi, id, edge_label, style);
+            let hit = &hits[idx - 1];
+            // Pipe form wins over embedded form if both somehow appear.
+            let edge_label = pipe_label.or_else(|| hit.label.clone());
+            g.add_edge(pi, id, edge_label, hit.style);
         }
         prev_id = Some(id);
     }
