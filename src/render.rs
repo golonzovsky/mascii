@@ -710,22 +710,23 @@ fn draw_merge(
         }
     }
 
-    // Bar along minor axis at mid_m from bar_lo to bar_hi.
-    let top_mn = srcs.first().unwrap().1;
-    let bot_mn = srcs.last().unwrap().1;
-    let bar_lo = top_mn.min(dmn);
-    let bar_hi = bot_mn.max(dmn);
-    for mn in bar_lo..=bar_hi {
-        let mut sides = 0u8;
-        if mn > bar_lo {
-            sides |= axes.minor_back();
-        }
-        if mn < bar_hi {
-            sides |= axes.minor_fwd();
-        }
-        if sides != 0 {
-            let (x, y) = axes.xy(mid_m, mn);
-            canvas.add_sides(x, y, sides, style, CellKind::Edge);
+    // Bar segments: one per source, each in its own style, running from the
+    // source column to the target column. Overlapping cells at the target
+    // column get the dominant style via `max_over` inside `add_sides`.
+    for &(_, smn, src_style) in &srcs {
+        let (lo, hi) = if smn < dmn { (smn, dmn) } else { (dmn, smn) };
+        for mn in lo..=hi {
+            let mut sides = 0u8;
+            if mn > lo {
+                sides |= axes.minor_back();
+            }
+            if mn < hi {
+                sides |= axes.minor_fwd();
+            }
+            if sides != 0 {
+                let (x, y) = axes.xy(mid_m, mn);
+                canvas.add_sides(x, y, sides, src_style, CellKind::Edge);
+            }
         }
     }
 
