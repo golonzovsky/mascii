@@ -28,6 +28,7 @@ pub fn layout(mut g: Graph, padding: usize) -> Graph {
     }
     assign_x(&mut g, minor_gap(dir));
     assign_y(&mut g);
+    push_subgraphs_clear_of_neighbors(&mut g);
     if horizontal {
         for n in &mut g.nodes {
             std::mem::swap(&mut n.x, &mut n.y);
@@ -35,6 +36,57 @@ pub fn layout(mut g: Graph, padding: usize) -> Graph {
         }
     }
     g
+}
+
+/// After x/y positions are assigned, give each subgraph a little breathing
+/// room: if any non-member node's right edge is within the container's left
+/// padding zone, shift every member of that subgraph rightward until the
+/// container border has a 1-cell visible gap from the neighbor.
+fn push_subgraphs_clear_of_neighbors(g: &mut Graph) {
+    // Matches the padding used by the renderer when it draws containers.
+    const CONTAINER_PAD_X: usize = 2;
+    const MIN_GAP: usize = 1;
+
+    for sid in 0..g.subgraphs.len() {
+        let members: Vec<NodeId> = g
+            .nodes
+            .iter()
+            .filter(|n| !n.is_dummy && node_in_subgraph(g, n.id, sid))
+            .map(|n| n.id)
+            .collect();
+        if members.is_empty() {
+            continue;
+        }
+        let min_x = members.iter().map(|&id| g.nodes[id].x).min().unwrap();
+        // max right edge of any node that isn't a member of this subgraph.
+        let neighbor_right = g
+            .nodes
+            .iter()
+            .filter(|n| !n.is_dummy && !node_in_subgraph(g, n.id, sid))
+            .filter(|n| n.x + n.width - 1 < min_x)
+            .map(|n| n.x + n.width - 1)
+            .max();
+        let Some(nr) = neighbor_right else { continue };
+        // Need: container_left = min_x - PAD_X >= nr + 1 + MIN_GAP
+        let needed_min_x = nr + 1 + MIN_GAP + CONTAINER_PAD_X;
+        if min_x < needed_min_x {
+            let delta = needed_min_x - min_x;
+            for &id in &members {
+                g.nodes[id].x += delta;
+            }
+        }
+    }
+}
+
+fn node_in_subgraph(g: &Graph, node: NodeId, sid: usize) -> bool {
+    let mut cur = g.nodes[node].subgraph;
+    while let Some(s) = cur {
+        if s == sid {
+            return true;
+        }
+        cur = g.subgraphs[s].parent;
+    }
+    false
 }
 
 fn compute_node_dims(g: &mut Graph, padding: usize) {
@@ -112,6 +164,8 @@ fn insert_dummies(g: &mut Graph) {
                 order: 0,
                 x: 0,
                 y: 0,
+                style: crate::style::Style::new(),
+                subgraph: None,
             });
             g.edges.push(Edge {
                 from: prev,
@@ -264,7 +318,7 @@ fn assign_x(g: &mut Graph, gap: usize) {
                 continue;
             }
             let mut end = l;
-            while end + 1 <= max_layer
+            while end < max_layer
                 && layers[end + 1].len() == 1
                 && is_linear(layers[end + 1][0])
             {

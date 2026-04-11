@@ -1,4 +1,4 @@
-use crate::graph::{ArrowTip, Direction, EdgeStyle, Graph, NodeId, Shape};
+use crate::graph::{ArrowTip, Direction, EdgeStyle, Graph, NodeId, Shape, SubgraphId};
 use crate::style::{Color, Style};
 use std::collections::HashMap;
 
@@ -86,6 +86,14 @@ impl Theme {
             CellKind::Arrow => self.arrow,
             CellKind::Crossing => self.crossing,
         }
+    }
+
+    fn is_plain(&self) -> bool {
+        self.border.is_empty()
+            && self.label.is_empty()
+            && self.edge.is_empty()
+            && self.arrow.is_empty()
+            && self.crossing.is_empty()
     }
 }
 
@@ -266,6 +274,8 @@ struct Canvas {
     kinds: Vec<Vec<CellKind>>,
     sides: Vec<Vec<u8>>,
     cell_style: Vec<Vec<EdgeStyle>>,
+    // Per-cell style override: non-empty values win over the theme.
+    override_style: Vec<Vec<Style>>,
 }
 
 impl Canvas {
@@ -275,11 +285,67 @@ impl Canvas {
             kinds: vec![vec![CellKind::Empty; w]; h],
             sides: vec![vec![0u8; w]; h],
             cell_style: vec![vec![EdgeStyle::Normal; w]; h],
+            override_style: vec![vec![Style::new(); w]; h],
         }
+    }
+
+    fn set_override(&mut self, x: usize, y: usize, style: Style) {
+        if self.in_bounds(x, y) {
+            self.override_style[y][x] = style;
+        }
+    }
+
+    /// Grow the canvas to at least `w × h`.
+    fn ensure(&mut self, w: usize, h: usize) {
+        while self.chars.len() < h {
+            self.chars.push(vec![' '; w.max(self.width())]);
+            self.kinds.push(vec![CellKind::Empty; w.max(self.width())]);
+            self.sides.push(vec![0u8; w.max(self.width())]);
+            self.cell_style.push(vec![EdgeStyle::Normal; w.max(self.width())]);
+            self.override_style.push(vec![Style::new(); w.max(self.width())]);
+        }
+        for row in &mut self.chars {
+            while row.len() < w {
+                row.push(' ');
+            }
+        }
+        for row in &mut self.kinds {
+            while row.len() < w {
+                row.push(CellKind::Empty);
+            }
+        }
+        for row in &mut self.sides {
+            while row.len() < w {
+                row.push(0);
+            }
+        }
+        for row in &mut self.cell_style {
+            while row.len() < w {
+                row.push(EdgeStyle::Normal);
+            }
+        }
+        for row in &mut self.override_style {
+            while row.len() < w {
+                row.push(Style::new());
+            }
+        }
+    }
+
+    fn width(&self) -> usize {
+        self.chars.first().map(|r| r.len()).unwrap_or(0)
     }
 
     fn in_bounds(&self, x: usize, y: usize) -> bool {
         y < self.chars.len() && x < self.chars[y].len()
+    }
+
+    #[allow(dead_code)]
+    fn get_char(&self, x: usize, y: usize) -> char {
+        if self.in_bounds(x, y) {
+            self.chars[y][x]
+        } else {
+            ' '
+        }
     }
 
     // Direct write — for borders, labels, arrows (anything that isn't
@@ -297,6 +363,7 @@ impl Canvas {
         self.kinds.reverse();
         self.sides.reverse();
         self.cell_style.reverse();
+        self.override_style.reverse();
         for row in &mut self.chars {
             for c in row.iter_mut() {
                 *c = flip_glyph_v(*c);
@@ -320,6 +387,9 @@ impl Canvas {
             row.reverse();
         }
         for row in &mut self.cell_style {
+            row.reverse();
+        }
+        for row in &mut self.override_style {
             row.reverse();
         }
         // Re-reverse any contiguous run of Label cells so text reads L→R.
@@ -397,6 +467,16 @@ pub fn render(g: &Graph, theme: &Theme) -> String {
             n.label_lines.clone()
         };
         draw_box(&mut canvas, n.x, n.y, n.width, n.height, &lines, n.shape);
+        // Apply the node's user style as a per-cell override over the whole
+        // box rectangle so borders get `stroke`/`color` and the interior gets
+        // `fill` as a background.
+        if !n.style.is_empty() {
+            for dy in 0..n.height {
+                for dx in 0..n.width {
+                    canvas.set_override(n.x + dx, n.y + dy, n.style);
+                }
+            }
+        }
     }
 
     let axes = Axes { dir: inner_dir(g.dir) };
@@ -488,6 +568,12 @@ pub fn render(g: &Graph, theme: &Theme) -> String {
         }
     }
 
+    // Subgraph containers: draw a bordered box around all nodes tagged with
+    // each subgraph, grown to cover their bounding rectangle plus padding.
+    // We draw containers AFTER the node boxes/edges so their borders overlay
+    // anything that strays outside. Innermost subgraphs drawn last.
+    draw_subgraph_containers(&mut canvas, g);
+
     match g.dir {
         Direction::BT => canvas.flip_v(),
         Direction::RL => canvas.flip_h(),
@@ -495,6 +581,121 @@ pub fn render(g: &Graph, theme: &Theme) -> String {
     }
 
     emit(&canvas, theme)
+}
+
+fn draw_subgraph_containers(canvas: &mut Canvas, g: &Graph) {
+    // Pad around contained nodes — more vertical than horizontal since the
+    // title bar lives on top.
+    const PAD_X: usize = 2;
+    const PAD_TOP: usize = 2;
+    const PAD_BOTTOM: usize = 1;
+
+    // Order by nesting depth (outer first, inner last) so inner borders end
+    // up visible above outer ones.
+    let mut ordered: Vec<usize> = (0..g.subgraphs.len()).collect();
+    ordered.sort_by_key(|&sid| depth(g, sid));
+
+    for sid in ordered {
+        let mut min_x = usize::MAX;
+        let mut max_x = 0usize;
+        let mut min_y = usize::MAX;
+        let mut max_y = 0usize;
+        let mut any = false;
+        for n in &g.nodes {
+            if !node_belongs(g, n.id, sid) {
+                continue;
+            }
+            any = true;
+            min_x = min_x.min(n.x);
+            max_x = max_x.max(n.x + n.width - 1);
+            min_y = min_y.min(n.y);
+            max_y = max_y.max(n.y + n.height - 1);
+        }
+        if !any {
+            continue;
+        }
+        let left = min_x.saturating_sub(PAD_X);
+        let right = max_x + PAD_X;
+        let top = min_y.saturating_sub(PAD_TOP);
+        let bottom = max_y + PAD_BOTTOM;
+
+        // Expand canvas if the container ran past its current bounds.
+        canvas.ensure(right + 1, bottom + 1);
+
+        let sg = &g.subgraphs[sid];
+        // Draw container cells, but never overwrite an adjacent node's box
+        // border. Edges and empty cells are fair game.
+        let mut put = |cx: usize, cy: usize, ch: char| {
+            let kind = canvas.kinds.get(cy).and_then(|r| r.get(cx)).copied();
+            if !matches!(kind, Some(CellKind::Border)) {
+                canvas.set(cx, cy, ch, CellKind::Border);
+            }
+        };
+        for x in left + 1..right {
+            put(x, top, '─');
+            put(x, bottom, '─');
+        }
+        for y in top + 1..bottom {
+            put(left, y, '│');
+            put(right, y, '│');
+        }
+        put(left, top, '┌');
+        put(right, top, '┐');
+        put(left, bottom, '└');
+        put(right, bottom, '┘');
+
+        // Title: "── Label ──" on the top border, left-anchored.
+        let label = if !sg.label.is_empty() {
+            sg.label.as_str()
+        } else {
+            sg.name.as_str()
+        };
+        if !label.is_empty() {
+            let title_len = label.chars().count();
+            let inner = (right - left).saturating_sub(2);
+            if title_len <= inner.saturating_sub(2) {
+                let start = left + 2;
+                // Leading space, then label, then trailing space before the
+                // border continues.
+                canvas.set(start - 1, top, ' ', CellKind::Border);
+                for (k, ch) in label.chars().enumerate() {
+                    canvas.set(start + k, top, ch, CellKind::Label);
+                }
+                canvas.set(start + title_len, top, ' ', CellKind::Border);
+            }
+        }
+
+        if !sg.style.is_empty() {
+            for y in top..=bottom {
+                for x in left..=right {
+                    if y == top || y == bottom || x == left || x == right {
+                        canvas.set_override(x, y, sg.style);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn node_belongs(g: &Graph, node: NodeId, sid: SubgraphId) -> bool {
+    let mut cur = g.nodes[node].subgraph;
+    while let Some(s) = cur {
+        if s == sid {
+            return true;
+        }
+        cur = g.subgraphs[s].parent;
+    }
+    false
+}
+
+fn depth(g: &Graph, sid: SubgraphId) -> usize {
+    let mut d = 0;
+    let mut cur = g.subgraphs[sid].parent;
+    while let Some(p) = cur {
+        d += 1;
+        cur = g.subgraphs[p].parent;
+    }
+    d
 }
 
 fn place_edge_label_td(canvas: &mut Canvas, sx: usize, sy: usize, text: &str) {
@@ -524,21 +725,37 @@ fn place_edge_label_td(canvas: &mut Canvas, sx: usize, sy: usize, text: &str) {
 }
 
 fn emit(canvas: &Canvas, theme: &Theme) -> String {
+    let apply_overrides = !theme.is_plain();
     let mut out = String::new();
-    for (row_chars, row_kinds) in canvas.chars.iter().zip(canvas.kinds.iter()) {
-        let last_nonempty = row_chars.iter().rposition(|&c| c != ' ');
-        let end = match last_nonempty {
-            Some(i) => i + 1,
-            None => {
-                out.push('\n');
-                continue;
-            }
-        };
+    for ((row_chars, row_kinds), row_override) in canvas
+        .chars
+        .iter()
+        .zip(canvas.kinds.iter())
+        .zip(canvas.override_style.iter())
+    {
+        // Row length for trimming: include any cell with non-space char OR a
+        // non-empty override (background colors matter even for space cells).
+        let end = (0..row_chars.len())
+            .rev()
+            .find(|&i| {
+                row_chars[i] != ' ' || (apply_overrides && !row_override[i].is_empty())
+            })
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        if end == 0 {
+            out.push('\n');
+            continue;
+        }
         let mut current = Style::new();
         for i in 0..end {
             let ch = row_chars[i];
             let kind = row_kinds[i];
-            let want = theme.style_for(kind);
+            let base = theme.style_for(kind);
+            let want = if apply_overrides {
+                combine_style(base, row_override[i], kind)
+            } else {
+                base
+            };
             if want != current {
                 if !current.is_empty() {
                     out.push_str(RESET);
@@ -558,6 +775,21 @@ fn emit(canvas: &Canvas, theme: &Theme) -> String {
     }
     while out.starts_with('\n') {
         out.remove(0);
+    }
+    out
+}
+
+/// Merge a per-cell style override on top of the theme's style. Only the
+/// border cells pick up `stroke` as `fg`; we never paint the background
+/// because box interiors are rectangular and can't follow rounded corners.
+/// `fill` is used as a fallback fg when `stroke` isn't specified.
+fn combine_style(base: Style, over: Style, kind: CellKind) -> Style {
+    if over.is_empty() {
+        return base;
+    }
+    let mut out = base;
+    if kind == CellKind::Border && let Some(fg) = over.fg.or(over.bg) {
+        out.fg = Some(fg);
     }
     out
 }

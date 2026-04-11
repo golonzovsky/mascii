@@ -1,6 +1,8 @@
+use crate::style::Style;
 use std::collections::HashMap;
 
 pub type NodeId = usize;
+pub type SubgraphId = usize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Direction {
@@ -38,6 +40,20 @@ pub struct Node {
     pub order: usize,
     pub x: usize,
     pub y: usize,
+    /// User-supplied style (via `style X ..` / `classDef` / `class X ..`).
+    pub style: Style,
+    /// Enclosing subgraph, if any.
+    pub subgraph: Option<SubgraphId>,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct Subgraph {
+    pub id: SubgraphId,
+    pub name: String,
+    pub label: String,
+    pub parent: Option<SubgraphId>,
+    pub style: Style,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -92,6 +108,8 @@ pub struct Graph {
     pub edges: Vec<Edge>,
     pub name_to_id: HashMap<String, NodeId>,
     pub dir: Direction,
+    pub subgraphs: Vec<Subgraph>,
+    pub class_defs: HashMap<String, Style>,
 }
 
 impl Graph {
@@ -130,6 +148,8 @@ impl Graph {
             order: 0,
             x: 0,
             y: 0,
+            style: Style::new(),
+            subgraph: None,
         });
         self.name_to_id.insert(name.to_string(), id);
         id

@@ -1,4 +1,7 @@
-use crate::graph::{ArrowTip as GArrowTip, Direction, EdgeStyle, Graph, NodeId, Shape};
+use crate::graph::{
+    ArrowTip as GArrowTip, Direction, EdgeStyle, Graph, NodeId, Shape, Subgraph, SubgraphId,
+};
+use crate::style::{Color, Style};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ArrowTip {
@@ -209,12 +212,15 @@ fn find_edge_op(s: &str, from: usize) -> Option<EdgeHit> {
 
 pub fn parse(source: &str) -> Result<Graph, String> {
     let mut g = Graph::new();
+    let mut sg_stack: Vec<SubgraphId> = Vec::new();
+    // Deferred directives that need to resolve node names (which might not
+    // exist yet at the time of parsing), applied after a full first pass.
+    let mut class_applications: Vec<(Vec<String>, String)> = Vec::new();
+    let mut style_applications: Vec<(String, Style)> = Vec::new();
+
     for (lineno, raw) in source.lines().enumerate() {
         let line = raw.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if line.starts_with("%%") {
+        if line.is_empty() || line.starts_with("%%") {
             continue;
         }
         if let Some(rest) = line
@@ -229,28 +235,136 @@ pub fn parse(source: &str) -> Result<Graph, String> {
             } else if rest.eq_ignore_ascii_case("BT") {
                 Direction::BT
             } else {
-                // TD / TB / anything else → top-down
                 Direction::TD
             };
             continue;
         }
 
+        // subgraph id [Label] / subgraph id / subgraph "Label"
+        if let Some(rest) = line.strip_prefix("subgraph") {
+            let rest = rest.trim();
+            let (name, label, _) = parse_ident_label(rest)?;
+            let id = g.subgraphs.len();
+            g.subgraphs.push(Subgraph {
+                id,
+                name: if name.is_empty() { label.clone() } else { name },
+                label,
+                parent: sg_stack.last().copied(),
+                style: Style::new(),
+            });
+            sg_stack.push(id);
+            continue;
+        }
+        if line == "end" {
+            sg_stack.pop();
+            continue;
+        }
+
+        // classDef <name> <props>
+        if let Some(rest) = line.strip_prefix("classDef") {
+            let rest = rest.trim();
+            let (name, props) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+            let style = parse_css_props(props);
+            g.class_defs.insert(name.to_string(), style);
+            continue;
+        }
+        // class a,b,c <name>
+        if let Some(rest) = line.strip_prefix("class ") {
+            let rest = rest.trim();
+            if let Some((node_list, class_name)) = rest.rsplit_once(char::is_whitespace) {
+                let nodes: Vec<String> =
+                    node_list.split(',').map(|s| s.trim().to_string()).collect();
+                class_applications.push((nodes, class_name.to_string()));
+            }
+            continue;
+        }
+        // style <node> <props>
+        if let Some(rest) = line.strip_prefix("style ") {
+            let rest = rest.trim();
+            if let Some((node, props)) = rest.split_once(char::is_whitespace) {
+                style_applications.push((node.to_string(), parse_css_props(props)));
+            }
+            continue;
+        }
+
         let result = if find_edge_op(line, 0).is_some() {
-            parse_edge_line(&mut g, line)
+            parse_edge_line(&mut g, line, sg_stack.last().copied())
         } else {
             let (name, label, shape) = parse_ident_label(line)?;
-            g.add_node(&name, split_br(&label), shape);
+            let id = g.add_node(&name, split_br(&label), shape);
+            if let Some(&sg) = sg_stack.last() {
+                g.nodes[id].subgraph = Some(sg);
+            }
             Ok(())
         };
         result.map_err(|e| format!("line {}: {}", lineno + 1, e))?;
     }
+
+    // Apply deferred class/style directives.
+    for (nodes, class_name) in class_applications {
+        let Some(style) = g.class_defs.get(&class_name).copied() else {
+            continue;
+        };
+        for name in nodes {
+            if let Some(&id) = g.name_to_id.get(&name) {
+                g.nodes[id].style = merge_style(g.nodes[id].style, style);
+            }
+        }
+    }
+    for (name, style) in style_applications {
+        if let Some(&id) = g.name_to_id.get(&name) {
+            g.nodes[id].style = merge_style(g.nodes[id].style, style);
+        }
+    }
+
     if g.nodes.is_empty() {
         return Err("no nodes found".to_string());
     }
     Ok(g)
 }
 
-fn parse_edge_line(g: &mut Graph, line: &str) -> Result<(), String> {
+fn merge_style(mut base: Style, over: Style) -> Style {
+    if over.fg.is_some() {
+        base.fg = over.fg;
+    }
+    if over.bg.is_some() {
+        base.bg = over.bg;
+    }
+    if over.bold {
+        base.bold = true;
+    }
+    if over.italic {
+        base.italic = true;
+    }
+    if over.dim {
+        base.dim = true;
+    }
+    base
+}
+
+/// Parse Mermaid CSS-style properties like `fill:#fdd,stroke:#c00,color:#fff`.
+/// Only `fill`, `stroke`, `color` are recognised; the rest are ignored.
+fn parse_css_props(s: &str) -> Style {
+    let mut style = Style::new();
+    for part in s.split(',') {
+        let part = part.trim();
+        let Some((key, val)) = part.split_once(':') else {
+            continue;
+        };
+        let key = key.trim();
+        let val = val.trim();
+        let color = Color::parse_hex(val);
+        let Some(color) = color else { continue };
+        match key {
+            "fill" => style.bg = Some(color),
+            "stroke" | "color" => style.fg = Some(color),
+            _ => {}
+        }
+    }
+    style
+}
+
+fn parse_edge_line(g: &mut Graph, line: &str, sg: Option<SubgraphId>) -> Result<(), String> {
     // Split into segments by edge operator.
     let mut segments: Vec<&str> = Vec::new();
     let mut hits: Vec<EdgeHit> = Vec::new();
@@ -300,7 +414,13 @@ fn parse_edge_line(g: &mut Graph, line: &str) -> Result<(), String> {
                 return Err(format!("empty endpoint in edge: {}", line));
             }
             let (name, label, shape) = parse_ident_label(part)?;
-            group.push(g.add_node(&name, split_br(&label), shape));
+            let id = g.add_node(&name, split_br(&label), shape);
+            if let Some(s) = sg
+                && g.nodes[id].subgraph.is_none()
+            {
+                g.nodes[id].subgraph = Some(s);
+            }
+            group.push(id);
         }
         groups.push(group);
         pipe_labels.push(pipe_label);

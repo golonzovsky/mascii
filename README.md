@@ -112,9 +112,9 @@ flowchart BT
  ┌──────────┐
  │ Platform │
  └──────────┘
-      ▲
-      │
-      │
+       ▲
+       │
+       │
 ┌────────────┐
 │ Foundation │
 └────────────┘
@@ -159,25 +159,28 @@ flowchart TD
 │  Deploy  │
 │ pipeline │
 └──────────┘
-     │
-     │
-     ▼
- ┌───────┐
- │ Build │
- └───────┘
-    │
-    │
-    ▼
- ┌──────┐
- │ Test │
- └──────┘
-    │
-    │
-    ▼
- ┌──────┐
- │ Ship │
- └──────┘
+      │
+      │
+      ▼
+  ┌───────┐
+  │ Build │
+  └───────┘
+      │
+      │
+      ▼
+  ┌──────┐
+  │ Test │
+  └──────┘
+      │
+      │
+      ▼
+  ┌──────┐
+  │ Ship │
+  └──────┘
 ```
+
+Linear chains of mixed-width boxes share a common integer center column so
+they line up visually.
 
 ## Install
 
@@ -201,12 +204,16 @@ cat diagram.mmd | mascii
 
 ## Supported Mermaid syntax
 
-- `flowchart TD` / `flowchart LR`
+- Direction: `flowchart TD` / `TB` / `BT` / `LR` / `RL`
 - Node shapes: `[square]`, `(round)`, `{diamond}`
+- Multi-line labels: `A["line 1<br>line 2"]`
 - Edges: `-->` normal, `==>` thick, `-.->` dotted, `~~~` invisible (layout only),
   `---` open line (no arrow), `<-->` bidirectional, `--x` / `--o` cross / circle tip
+- Long edges: `--->`, `---->`, … stretch the edge across more layers
 - Edge labels: `A -->|text| B` and `A -- text --> B`
 - Chains: `A --> B --> C`
 - `&` cross-product chaining: `a --> b & c --> d` expands to `a→b, a→c, b→d, c→d`
-- Long edges (pass through intermediate layers)
+- Subgraphs: `subgraph id [Label] ... end` (nested allowed)
+- Styling: `classDef`, `class a,b name`, `style node fill:#..,stroke:#..`
+- Font Awesome tokens (`fa:fa-car`) are stripped from labels
 - Fan-in merges, fan-out splits
