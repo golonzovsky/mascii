@@ -229,9 +229,8 @@ fn assign_x(g: &mut Graph, gap: usize) {
         normalize_x(&mut layer_x);
     }
 
-    // Single-node layer symmetry: solitary roots/leaves/middle nodes end up
-    // centered exactly on the midpoint of their (preds + succs), so a root
-    // with siblings b,c and a leaf with the same preds land on the same column.
+    // Single-node layer symmetry: align solitary nodes on the midpoint of
+    // their neighbors (so fan-in/fan-out siblings center under/over them).
     for l in 0..=max_layer {
         if layers[l].len() != 1 {
             continue;
@@ -250,6 +249,39 @@ fn assign_x(g: &mut Graph, gap: usize) {
         let half = g.nodes[id].width as f64 / 2.0;
         let target = if avg <= half { 0 } else { (avg - half).round() as usize };
         layer_x[l][0] = target;
+    }
+
+    // Chain alignment: when a run of consecutive single-node layers forms a
+    // linear chain (each node has ≤ 1 predecessor and ≤ 1 successor), line
+    // up their integer centers on a common column. Fixes parity mismatches
+    // in mixed-width chains where no single float-center works for all boxes.
+    let is_linear = |id: NodeId| preds[id].len() <= 1 && succs[id].len() <= 1;
+    {
+        let mut l = 0;
+        while l <= max_layer {
+            if layers[l].len() != 1 || !is_linear(layers[l][0]) {
+                l += 1;
+                continue;
+            }
+            let mut end = l;
+            while end + 1 <= max_layer
+                && layers[end + 1].len() == 1
+                && is_linear(layers[end + 1][0])
+            {
+                end += 1;
+            }
+            if end > l {
+                let c = (l..=end)
+                    .map(|k| g.nodes[layers[k][0]].width / 2)
+                    .max()
+                    .unwrap_or(0);
+                for k in l..=end {
+                    let w2 = g.nodes[layers[k][0]].width / 2;
+                    layer_x[k][0] = c - w2;
+                }
+            }
+            l = end + 1;
+        }
     }
     normalize_x(&mut layer_x);
 
@@ -275,7 +307,7 @@ fn neighbor_target_x(
         .map(|&ni| {
             let nl = g.nodes[ni].layer;
             let np = g.nodes[ni].order;
-            (layer_x[nl][np] + g.nodes[ni].width / 2) as f64
+            layer_x[nl][np] as f64 + g.nodes[ni].width as f64 / 2.0
         })
         .sum::<f64>()
         / neighbors.len() as f64;

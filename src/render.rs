@@ -639,6 +639,18 @@ fn preferred_endpoints(
 ) -> (usize, usize) {
     let (slo, shi) = inner_range(src, dir);
     let (dlo, dhi) = inner_range(dst, dir);
+    // Prefer dst's own center — it's the "natural" attach point and, for
+    // chains of mixed widths, ensures all edges land on the same column
+    // (the narrowest box in the chain). Fall back to src's center, then
+    // the overlap midpoint.
+    let dst_center = minor_center(dst, dir);
+    if dst_center >= slo && dst_center <= shi && dst_center >= dlo && dst_center <= dhi {
+        return (dst_center, dst_center);
+    }
+    let src_center = minor_center(src, dir);
+    if src_center >= slo && src_center <= shi && src_center >= dlo && src_center <= dhi {
+        return (src_center, src_center);
+    }
     let overlap_lo = slo.max(dlo);
     let overlap_hi = shi.min(dhi);
     if overlap_lo <= overlap_hi {
@@ -646,8 +658,8 @@ fn preferred_endpoints(
         (mid, mid)
     } else {
         (
-            clamp(minor_center(dst, dir), slo, shi),
-            clamp(minor_center(src, dir), dlo, dhi),
+            clamp(dst_center, slo, shi),
+            clamp(src_center, dlo, dhi),
         )
     }
 }
