@@ -339,15 +339,6 @@ impl Canvas {
         y < self.chars.len() && x < self.chars[y].len()
     }
 
-    #[allow(dead_code)]
-    fn get_char(&self, x: usize, y: usize) -> char {
-        if self.in_bounds(x, y) {
-            self.chars[y][x]
-        } else {
-            ' '
-        }
-    }
-
     // Direct write — for borders, labels, arrows (anything that isn't
     // line-art managed by the sides bitmask).
     fn set(&mut self, x: usize, y: usize, ch: char, kind: CellKind) {
@@ -602,7 +593,7 @@ fn draw_subgraph_containers(canvas: &mut Canvas, g: &Graph) {
         let mut max_y = 0usize;
         let mut any = false;
         for n in &g.nodes {
-            if !node_belongs(g, n.id, sid) {
+            if !g.node_in_subgraph(n.id, sid) {
                 continue;
             }
             any = true;
@@ -675,17 +666,6 @@ fn draw_subgraph_containers(canvas: &mut Canvas, g: &Graph) {
             }
         }
     }
-}
-
-fn node_belongs(g: &Graph, node: NodeId, sid: SubgraphId) -> bool {
-    let mut cur = g.nodes[node].subgraph;
-    while let Some(s) = cur {
-        if s == sid {
-            return true;
-        }
-        cur = g.subgraphs[s].parent;
-    }
-    false
 }
 
 fn depth(g: &Graph, sid: SubgraphId) -> usize {
@@ -779,19 +759,15 @@ fn emit(canvas: &Canvas, theme: &Theme) -> String {
     out
 }
 
-/// Merge a per-cell style override on top of the theme's style. Only the
-/// border cells pick up `stroke` as `fg`; we never paint the background
-/// because box interiors are rectangular and can't follow rounded corners.
-/// `fill` is used as a fallback fg when `stroke` isn't specified.
+/// Merge a per-cell override onto the theme's style. Only border cells pick
+/// up the override's `fg` (stroke); box interiors stay untouched because a
+/// rectangular background can't follow rounded corners.
 fn combine_style(base: Style, over: Style, kind: CellKind) -> Style {
-    if over.is_empty() {
-        return base;
+    if kind == CellKind::Border && let Some(fg) = over.fg {
+        Style { fg: Some(fg), ..base }
+    } else {
+        base
     }
-    let mut out = base;
-    if kind == CellKind::Border && let Some(fg) = over.fg.or(over.bg) {
-        out.fg = Some(fg);
-    }
-    out
 }
 
 fn draw_box(

@@ -1,6 +1,3 @@
-// Some helpers are queued for use once we wire up `style`/`classDef` parsing.
-#![allow(dead_code)]
-
 use std::fmt::Write;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -13,10 +10,6 @@ pub enum Color {
 }
 
 impl Color {
-    pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
-        Color::Rgb(r, g, b)
-    }
-
     pub const GREY: Self = Color::Sgr(90);
     pub const BRIGHT_WHITE: Self = Color::Sgr(97);
     pub const VIOLET: Self = Color::Rgb(188, 19, 254);
@@ -34,25 +27,6 @@ impl Color {
             }
             Color::Sgr(n) => {
                 let _ = write!(out, "\x1b[{}m", n);
-            }
-        }
-    }
-
-    /// Emit an ANSI background SGR into `out`.
-    pub fn write_bg(&self, out: &mut String) {
-        match *self {
-            Color::Default => out.push_str("\x1b[49m"),
-            Color::Rgb(r, g, b) => {
-                let _ = write!(out, "\x1b[48;2;{};{};{}m", r, g, b);
-            }
-            // Foreground 30..37 → bg 40..47; 90..97 → 100..107.
-            Color::Sgr(n) => {
-                let bg = if (30..=37).contains(&n) || (90..=97).contains(&n) {
-                    n + 10
-                } else {
-                    n
-                };
-                let _ = write!(out, "\x1b[{}m", bg);
             }
         }
     }
@@ -82,7 +56,6 @@ impl Color {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Style {
     pub fg: Option<Color>,
-    pub bg: Option<Color>,
     pub bold: bool,
     pub italic: bool,
     pub dim: bool,
@@ -92,7 +65,6 @@ impl Style {
     pub const fn new() -> Self {
         Self {
             fg: None,
-            bg: None,
             bold: false,
             italic: false,
             dim: false,
@@ -101,7 +73,6 @@ impl Style {
     pub const fn fg(fg: Color) -> Self {
         Self {
             fg: Some(fg),
-            bg: None,
             bold: false,
             italic: false,
             dim: false,
@@ -110,14 +81,13 @@ impl Style {
     pub const fn dim() -> Self {
         Self {
             fg: None,
-            bg: None,
             bold: false,
             italic: false,
             dim: true,
         }
     }
     pub fn is_empty(&self) -> bool {
-        self.fg.is_none() && self.bg.is_none() && !self.bold && !self.italic && !self.dim
+        self.fg.is_none() && !self.bold && !self.italic && !self.dim
     }
     pub fn write(&self, out: &mut String) {
         if self.bold {
@@ -131,9 +101,6 @@ impl Style {
         }
         if let Some(fg) = self.fg {
             fg.write_fg(out);
-        }
-        if let Some(bg) = self.bg {
-            bg.write_bg(out);
         }
     }
 }

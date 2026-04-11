@@ -47,9 +47,7 @@ pub struct Node {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Subgraph {
-    pub id: SubgraphId,
     pub name: String,
     pub label: String,
     pub parent: Option<SubgraphId>,
@@ -153,6 +151,18 @@ impl Graph {
         });
         self.name_to_id.insert(name.to_string(), id);
         id
+    }
+
+    /// Is `node` a member of `sid` (directly or via a nested parent)?
+    pub fn node_in_subgraph(&self, node: NodeId, sid: SubgraphId) -> bool {
+        let mut cur = self.nodes[node].subgraph;
+        while let Some(s) = cur {
+            if s == sid {
+                return true;
+            }
+            cur = self.subgraphs[s].parent;
+        }
+        false
     }
 
     #[allow(clippy::too_many_arguments)]

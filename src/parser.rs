@@ -1,15 +1,7 @@
 use crate::graph::{
-    ArrowTip as GArrowTip, Direction, EdgeStyle, Graph, NodeId, Shape, Subgraph, SubgraphId,
+    ArrowTip, Direction, EdgeStyle, Graph, NodeId, Shape, Subgraph, SubgraphId,
 };
 use crate::style::{Color, Style};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ArrowTip {
-    None,    // open link: ---
-    Arrow,   // --> / ==> / -.-> / longer
-    Cross,   // --x
-    Circle,  // --o
-}
 
 #[derive(Debug)]
 struct EdgeHit {
@@ -246,7 +238,6 @@ pub fn parse(source: &str) -> Result<Graph, String> {
             let (name, label, _) = parse_ident_label(rest)?;
             let id = g.subgraphs.len();
             g.subgraphs.push(Subgraph {
-                id,
                 name: if name.is_empty() { label.clone() } else { name },
                 label,
                 parent: sg_stack.last().copied(),
@@ -327,39 +318,34 @@ fn merge_style(mut base: Style, over: Style) -> Style {
     if over.fg.is_some() {
         base.fg = over.fg;
     }
-    if over.bg.is_some() {
-        base.bg = over.bg;
-    }
-    if over.bold {
-        base.bold = true;
-    }
-    if over.italic {
-        base.italic = true;
-    }
-    if over.dim {
-        base.dim = true;
-    }
+    base.bold |= over.bold;
+    base.italic |= over.italic;
+    base.dim |= over.dim;
     base
 }
 
 /// Parse Mermaid CSS-style properties like `fill:#fdd,stroke:#c00,color:#fff`.
-/// Only `fill`, `stroke`, `color` are recognised; the rest are ignored.
+/// Only `fill`, `stroke`, `color` are recognised. Because we never paint box
+/// interiors (rectangular backgrounds would break rounded corners), all three
+/// map to `fg` — `stroke`/`color` win, `fill` is a fallback.
 fn parse_css_props(s: &str) -> Style {
     let mut style = Style::new();
+    let mut fill: Option<Color> = None;
     for part in s.split(',') {
-        let part = part.trim();
         let Some((key, val)) = part.split_once(':') else {
             continue;
         };
-        let key = key.trim();
-        let val = val.trim();
-        let color = Color::parse_hex(val);
-        let Some(color) = color else { continue };
-        match key {
-            "fill" => style.bg = Some(color),
+        let Some(color) = Color::parse_hex(val.trim()) else {
+            continue;
+        };
+        match key.trim() {
             "stroke" | "color" => style.fg = Some(color),
+            "fill" => fill = Some(color),
             _ => {}
         }
+    }
+    if style.fg.is_none() {
+        style.fg = fill;
     }
     style
 }
@@ -429,17 +415,19 @@ fn parse_edge_line(g: &mut Graph, line: &str, sg: Option<SubgraphId>) -> Result<
     for i in 1..groups.len() {
         let hit = &hits[i - 1];
         let edge_label = pipe_labels[i].clone().or_else(|| hit.label.clone());
-        let tip_fwd = match hit.tip_fwd {
-            ArrowTip::None => GArrowTip::None,
-            ArrowTip::Arrow => GArrowTip::Arrow,
-            ArrowTip::Cross => GArrowTip::Cross,
-            ArrowTip::Circle => GArrowTip::Circle,
-        };
         let left = groups[i - 1].clone();
         let right = groups[i].clone();
         for &from in &left {
             for &to in &right {
-                g.add_edge(from, to, edge_label.clone(), hit.style, tip_fwd, hit.tip_back, hit.length);
+                g.add_edge(
+                    from,
+                    to,
+                    edge_label.clone(),
+                    hit.style,
+                    hit.tip_fwd,
+                    hit.tip_back,
+                    hit.length,
+                );
             }
         }
     }

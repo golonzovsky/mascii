@@ -1,6 +1,5 @@
 use crate::graph::{ArrowTip, Direction, Edge, Graph, Node, NodeId, Shape};
 
-const CHANNEL: usize = 3;
 // LR-only: horizontal `─` padding on each side of an inline edge label.
 pub const LR_LABEL_PAD: usize = 2;
 
@@ -51,23 +50,22 @@ fn push_subgraphs_clear_of_neighbors(g: &mut Graph) {
         let members: Vec<NodeId> = g
             .nodes
             .iter()
-            .filter(|n| !n.is_dummy && node_in_subgraph(g, n.id, sid))
+            .filter(|n| !n.is_dummy && g.node_in_subgraph(n.id, sid))
             .map(|n| n.id)
             .collect();
         if members.is_empty() {
             continue;
         }
         let min_x = members.iter().map(|&id| g.nodes[id].x).min().unwrap();
-        // max right edge of any node that isn't a member of this subgraph.
+        // Needs: container_left = min_x - PAD_X >= neighbor_right + 1 + MIN_GAP
         let neighbor_right = g
             .nodes
             .iter()
-            .filter(|n| !n.is_dummy && !node_in_subgraph(g, n.id, sid))
+            .filter(|n| !n.is_dummy && !g.node_in_subgraph(n.id, sid))
             .filter(|n| n.x + n.width - 1 < min_x)
             .map(|n| n.x + n.width - 1)
             .max();
         let Some(nr) = neighbor_right else { continue };
-        // Need: container_left = min_x - PAD_X >= nr + 1 + MIN_GAP
         let needed_min_x = nr + 1 + MIN_GAP + CONTAINER_PAD_X;
         if min_x < needed_min_x {
             let delta = needed_min_x - min_x;
@@ -76,17 +74,6 @@ fn push_subgraphs_clear_of_neighbors(g: &mut Graph) {
             }
         }
     }
-}
-
-fn node_in_subgraph(g: &Graph, node: NodeId, sid: usize) -> bool {
-    let mut cur = g.nodes[node].subgraph;
-    while let Some(s) = cur {
-        if s == sid {
-            return true;
-        }
-        cur = g.subgraphs[s].parent;
-    }
-    false
 }
 
 fn compute_node_dims(g: &mut Graph, padding: usize) {
@@ -474,6 +461,51 @@ fn align_layer(
     layer_x[l] = new_x;
 }
 
+/// A channel between layer `l` and `l+1` is tight if it contains only
+/// straight 1:1 edges — every source in `l` has exactly one successor and
+/// every target in `l+1` has exactly one predecessor across this channel,
+/// and every pair's minor-axis inner ranges overlap so `preferred_endpoints`
+/// will emit a straight edge.
+fn channel_is_tight(g: &Graph, l: usize) -> bool {
+    use std::collections::HashMap;
+    let mut src_out: HashMap<NodeId, usize> = HashMap::new();
+    let mut dst_in: HashMap<NodeId, usize> = HashMap::new();
+    let mut edges: Vec<(NodeId, NodeId)> = Vec::new();
+    for e in &g.edges {
+        if g.nodes[e.from].layer == l && g.nodes[e.to].layer == l + 1 {
+            *src_out.entry(e.from).or_insert(0) += 1;
+            *dst_in.entry(e.to).or_insert(0) += 1;
+            edges.push((e.from, e.to));
+        }
+    }
+    if edges.is_empty() {
+        return true;
+    }
+    if src_out.values().any(|&c| c != 1) || dst_in.values().any(|&c| c != 1) {
+        return false;
+    }
+    for (src_id, dst_id) in edges {
+        let src = &g.nodes[src_id];
+        let dst = &g.nodes[dst_id];
+        let (slo, shi) = node_inner_range(src);
+        let (dlo, dhi) = node_inner_range(dst);
+        if slo.max(dlo) > shi.min(dhi) {
+            return false;
+        }
+    }
+    true
+}
+
+fn node_inner_range(n: &Node) -> (usize, usize) {
+    if n.is_dummy {
+        (n.x, n.x)
+    } else if n.width >= 3 {
+        (n.x + 1, n.x + n.width - 2)
+    } else {
+        (n.x, n.x + n.width.saturating_sub(1))
+    }
+}
+
 fn assign_y(g: &mut Graph) {
     let max_layer = g.nodes.iter().map(|n| n.layer).max().unwrap_or(0);
     let mut layer_heights: Vec<usize> = vec![0; max_layer + 1];
@@ -484,8 +516,18 @@ fn assign_y(g: &mut Graph) {
         }
     }
 
-    // Channel size: bumped to fit edge labels.
-    let mut channel_heights: Vec<usize> = vec![CHANNEL; max_layer];
+    // Channel size. Tight (2) when every edge crossing the channel is 1:1
+    // and straight — just `│ ▼`. Otherwise 4 rows so L-turn corners get
+    // breathing room between the bend and the arrow.
+    const LTURN_CHANNEL: usize = 4;
+    let mut channel_heights: Vec<usize> = Vec::with_capacity(max_layer);
+    for l in 0..max_layer {
+        channel_heights.push(if channel_is_tight(g, l) {
+            2
+        } else {
+            LTURN_CHANNEL
+        });
+    }
     let horizontal = !g.dir.is_vertical();
     for e in &g.edges {
         let Some(text) = e.label.as_ref() else { continue };
@@ -499,7 +541,9 @@ fn assign_y(g: &mut Graph) {
                 channel_heights[l] = needed;
             }
         } else {
-            channel_heights[l] = channel_heights[l].max(CHANNEL + 1);
+            // Labels need their own row plus at least one drop cell above +
+            // below to look clean. Minimum 4 rows for labeled TD channels.
+            channel_heights[l] = channel_heights[l].max(4);
         }
     }
 
