@@ -2,6 +2,7 @@ use crate::graph::{
     ArrowTip, Direction, EdgeStyle, Graph, NodeId, Shape, Subgraph, SubgraphId,
 };
 use crate::style::{Color, Style};
+use std::collections::HashMap;
 
 #[derive(Debug)]
 struct EdgeHit {
@@ -308,10 +309,53 @@ pub fn parse(source: &str) -> Result<Graph, String> {
         }
     }
 
+    // Mermaid allows edges to/from subgraph IDs. If a node was created with
+    // the same name as a subgraph, reroute all its edges to the first real
+    // member of that subgraph and delete the phantom node.
+    resolve_subgraph_edges(&mut g);
+
     if g.nodes.is_empty() {
         return Err("no nodes found".to_string());
     }
     Ok(g)
+}
+
+fn resolve_subgraph_edges(g: &mut Graph) {
+    let mut sg_entry: HashMap<String, NodeId> = HashMap::new();
+    for (sid, sg) in g.subgraphs.iter().enumerate() {
+        if let Some(n) = g.nodes.iter().find(|n| !n.is_dummy && g.node_in_subgraph(n.id, sid)) {
+            sg_entry.insert(sg.name.clone(), n.id);
+        }
+    }
+    if sg_entry.is_empty() {
+        return;
+    }
+    // Find phantom nodes: name matches a subgraph name.
+    let mut phantom_map: HashMap<NodeId, NodeId> = HashMap::new(); // phantom → real
+    for (sg_name, &real_id) in &sg_entry {
+        if let Some(&phantom_id) = g.name_to_id.get(sg_name)
+            && phantom_id != real_id
+        {
+            phantom_map.insert(phantom_id, real_id);
+        }
+    }
+    if phantom_map.is_empty() {
+        return;
+    }
+    // Reroute edges.
+    for e in &mut g.edges {
+        if let Some(&real) = phantom_map.get(&e.from) {
+            e.from = real;
+        }
+        if let Some(&real) = phantom_map.get(&e.to) {
+            e.to = real;
+        }
+    }
+    // Mark phantom nodes as dummies so they get ignored in layout/render.
+    for &pid in phantom_map.keys() {
+        g.nodes[pid].is_dummy = true;
+        g.nodes[pid].label_lines.clear();
+    }
 }
 
 fn merge_style(mut base: Style, over: Style) -> Style {

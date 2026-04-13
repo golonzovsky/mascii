@@ -36,8 +36,6 @@ pub struct Node {
     pub shape: Shape,
     pub width: usize,
     pub height: usize,
-    pub layer: usize,
-    pub order: usize,
     pub x: usize,
     pub y: usize,
     /// User-supplied style (via `style X ..` / `classDef` / `class X ..`).
@@ -142,8 +140,6 @@ impl Graph {
             shape,
             width: 0,
             height: 0,
-            layer: 0,
-            order: 0,
             x: 0,
             y: 0,
             style: Style::new(),

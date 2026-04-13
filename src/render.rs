@@ -472,17 +472,16 @@ pub fn render(g: &Graph, theme: &Theme) -> String {
 
     let axes = Axes { dir: inner_dir(g.dir) };
 
-    // Dummies (pass-throughs) — inherit style from incoming edge.
+    // Dummies (pass-throughs) — inherit style from incoming edge. Phantom
+    // dummies left over from parser's subgraph-edge rerouting have no
+    // incoming edges and nothing to draw.
     for n in &g.nodes {
         if !n.is_dummy {
             continue;
         }
-        let style = g
-            .edges
-            .iter()
-            .find(|e| e.to == n.id)
-            .map(|e| e.style)
-            .unwrap_or(EdgeStyle::Normal);
+        let Some(style) = g.edges.iter().find(|e| e.to == n.id).map(|e| e.style) else {
+            continue;
+        };
         if style == EdgeStyle::Invisible {
             continue;
         }
