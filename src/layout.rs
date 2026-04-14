@@ -172,7 +172,11 @@ fn layout_level(
         }
     }
 
-    // Meta-nodes for every direct child subgraph of `context`.
+    // Meta-nodes for every direct child subgraph of `context`. The title
+    // constraint applies to whichever internal dimension will become the
+    // meta's horizontal extent in the final output — that's `w` for TD
+    // and `h` for LR (since LR swaps x/y at the end).
+    let horizontal_output = !g.dir.is_vertical();
     for sid in 0..g.subgraphs.len() {
         if g.subgraphs[sid].parent != context {
             continue;
@@ -185,10 +189,15 @@ fn layout_level(
         } else {
             &g.subgraphs[sid].name
         };
-        // Minimum width to fit "─ title ─" on the top border.
-        let min_title_w = title.chars().count() + 4;
-        let meta_w = (child.w + 2 * CONTAINER_PAD_X).max(min_title_w);
-        let meta_h = (child.h + CONTAINER_PAD_TOP + CONTAINER_PAD_BOTTOM).max(3);
+        // Minimum extent to fit "─ title ─" on the top border.
+        let min_title = title.chars().count() + 4;
+        let base_w = child.w + 2 * CONTAINER_PAD_X;
+        let base_h = (child.h + CONTAINER_PAD_TOP + CONTAINER_PAD_BOTTOM).max(3);
+        let (meta_w, meta_h) = if horizontal_output {
+            (base_w, base_h.max(min_title))
+        } else {
+            (base_w.max(min_title), base_h)
+        };
         let id = scope.push(Item::Meta { sub: sid }, meta_w, meta_h);
         item_of_meta.insert(sid, id);
     }
@@ -670,12 +679,23 @@ fn align_layer_scope(
 /// every target in `l+1` has exactly one predecessor across this channel,
 /// and every pair's minor-axis inner ranges overlap so `preferred_endpoints`
 /// will emit a straight edge.
+///
+/// Edges touching a meta-node are never considered tight: the meta-node's
+/// inner range spans its entire bounding box, but the actual rendered edge
+/// terminates at the child node it was rerouted to (often much narrower),
+/// so the real edge needs L-turn breathing room even though the slice-level
+/// check would otherwise say "straight".
 fn channel_is_tight_scope(scope: &Scope, l: usize) -> bool {
     let mut src_out: HashMap<usize, usize> = HashMap::new();
     let mut dst_in: HashMap<usize, usize> = HashMap::new();
     let mut edges: Vec<(usize, usize)> = Vec::new();
     for e in &scope.edges {
         if scope.layers[e.from] == l && scope.layers[e.to] == l + 1 {
+            if matches!(scope.items[e.from], Item::Meta { .. })
+                || matches!(scope.items[e.to], Item::Meta { .. })
+            {
+                return false;
+            }
             *src_out.entry(e.from).or_insert(0) += 1;
             *dst_in.entry(e.to).or_insert(0) += 1;
             edges.push((e.from, e.to));

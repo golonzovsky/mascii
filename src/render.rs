@@ -843,6 +843,7 @@ fn preferred_endpoints(
     src: &crate::graph::Node,
     dst: &crate::graph::Node,
     dir: InnerDir,
+    single: bool,
 ) -> (usize, usize) {
     let (slo, shi) = inner_range(src, dir);
     let (dlo, dhi) = inner_range(dst, dir);
@@ -862,12 +863,18 @@ fn preferred_endpoints(
     let overlap_hi = shi.min(dhi);
     if overlap_lo <= overlap_hi {
         let mid = (overlap_lo + overlap_hi) / 2;
-        (mid, mid)
+        return (mid, mid);
+    }
+    // No overlap. For a sole edge between two boxes, exit and enter on each
+    // box's own center so the L-turn looks centered. For multi-edge cases
+    // (fan-in / fan-out), clamp to the inner edge facing the other box so
+    // the spread step has distinct, sensible starting ports.
+    if single {
+        (src_center, dst_center)
     } else {
-        (
-            clamp(dst_center, slo, shi),
-            clamp(src_center, dlo, dhi),
-        )
+        let exit = dst_center.clamp(slo, shi);
+        let entry = src_center.clamp(dlo, dhi);
+        (exit, entry)
     }
 }
 
@@ -895,21 +902,24 @@ fn compute_endpoints(g: &Graph) -> Vec<(usize, usize, usize, usize)> {
     let dir = inner_dir(g.dir);
     let n_edges = g.edges.len();
 
-    // Initial per-edge minor-axis ports (TD=x, LR=y).
-    let mut exit_minor: Vec<usize> = vec![0; n_edges];
-    let mut entry_minor: Vec<usize> = vec![0; n_edges];
-    for (i, e) in g.edges.iter().enumerate() {
-        let (ex, en) = preferred_endpoints(&g.nodes[e.from], &g.nodes[e.to], dir);
-        exit_minor[i] = ex;
-        entry_minor[i] = en;
-    }
-
-    // Group edges by source / target and spread colliding ports.
+    // Group edges by source / target so preferred_endpoints can tell whether
+    // an edge is a sole link between two boxes (centered) vs part of a fan.
     let mut out_by_node: HashMap<NodeId, Vec<usize>> = HashMap::new();
     let mut in_by_node: HashMap<NodeId, Vec<usize>> = HashMap::new();
     for (i, e) in g.edges.iter().enumerate() {
         out_by_node.entry(e.from).or_default().push(i);
         in_by_node.entry(e.to).or_default().push(i);
+    }
+
+    // Initial per-edge minor-axis ports (TD=x, LR=y).
+    let mut exit_minor: Vec<usize> = vec![0; n_edges];
+    let mut entry_minor: Vec<usize> = vec![0; n_edges];
+    for (i, e) in g.edges.iter().enumerate() {
+        let single =
+            out_by_node[&e.from].len() == 1 && in_by_node[&e.to].len() == 1;
+        let (ex, en) = preferred_endpoints(&g.nodes[e.from], &g.nodes[e.to], dir, single);
+        exit_minor[i] = ex;
+        entry_minor[i] = en;
     }
 
     let spread = |by_node: &HashMap<NodeId, Vec<usize>>,
@@ -942,16 +952,6 @@ fn compute_endpoints(g: &Graph) -> Vec<(usize, usize, usize, usize)> {
             }
         })
         .collect()
-}
-
-fn clamp(v: usize, lo: usize, hi: usize) -> usize {
-    if v < lo {
-        lo
-    } else if v > hi {
-        hi
-    } else {
-        v
-    }
 }
 
 // L-shape / straight edge in (major, minor) coordinates. Works for both
