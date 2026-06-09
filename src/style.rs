@@ -56,46 +56,23 @@ impl Color {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Style {
     pub fg: Option<Color>,
-    pub bold: bool,
-    pub italic: bool,
     pub dim: bool,
 }
 
 impl Style {
     pub const fn new() -> Self {
-        Self {
-            fg: None,
-            bold: false,
-            italic: false,
-            dim: false,
-        }
+        Self { fg: None, dim: false }
     }
     pub const fn fg(fg: Color) -> Self {
-        Self {
-            fg: Some(fg),
-            bold: false,
-            italic: false,
-            dim: false,
-        }
+        Self { fg: Some(fg), dim: false }
     }
     pub const fn dim() -> Self {
-        Self {
-            fg: None,
-            bold: false,
-            italic: false,
-            dim: true,
-        }
+        Self { fg: None, dim: true }
     }
     pub fn is_empty(&self) -> bool {
-        self.fg.is_none() && !self.bold && !self.italic && !self.dim
+        self.fg.is_none() && !self.dim
     }
     pub fn write(&self, out: &mut String) {
-        if self.bold {
-            out.push_str("\x1b[1m");
-        }
-        if self.italic {
-            out.push_str("\x1b[3m");
-        }
         if self.dim {
             out.push_str("\x1b[2m");
         }

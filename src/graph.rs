@@ -52,6 +52,13 @@ pub struct Subgraph {
     pub style: Style,
 }
 
+impl Subgraph {
+    /// Display title: the label if present, otherwise the id/name.
+    pub fn title(&self) -> &str {
+        if self.label.is_empty() { &self.name } else { &self.label }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EdgeStyle {
     #[default]
@@ -109,10 +116,6 @@ pub struct Graph {
 }
 
 impl Graph {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     pub fn add_node(&mut self, name: &str, label_lines: Vec<String>, shape: Shape) -> NodeId {
         if let Some(&id) = self.name_to_id.get(name) {
             let has_real_label = !label_lines.iter().all(|l| l.is_empty());
@@ -149,6 +152,25 @@ impl Graph {
         id
     }
 
+    /// Add an invisible pass-through node (used for routing long edges).
+    pub fn add_dummy(&mut self, subgraph: Option<SubgraphId>) -> NodeId {
+        let id = self.nodes.len();
+        self.nodes.push(Node {
+            id,
+            name: format!("__dummy_{}", id),
+            label_lines: vec![],
+            is_dummy: true,
+            shape: Shape::Round,
+            width: 1,
+            height: 1,
+            x: 0,
+            y: 0,
+            style: Style::new(),
+            subgraph,
+        });
+        id
+    }
+
     /// Is `node` a member of `sid` (directly or via a nested parent)?
     pub fn node_in_subgraph(&self, node: NodeId, sid: SubgraphId) -> bool {
         let mut cur = self.nodes[node].subgraph;
@@ -159,27 +181,5 @@ impl Graph {
             cur = self.subgraphs[s].parent;
         }
         false
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn add_edge(
-        &mut self,
-        from: NodeId,
-        to: NodeId,
-        label: Option<String>,
-        style: EdgeStyle,
-        tip_fwd: ArrowTip,
-        tip_back: bool,
-        length: usize,
-    ) {
-        self.edges.push(Edge {
-            from,
-            to,
-            label,
-            style,
-            tip_fwd,
-            tip_back,
-            length: length.max(1),
-        });
     }
 }

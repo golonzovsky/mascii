@@ -1,4 +1,7 @@
-use crate::graph::{ArrowTip, Direction, EdgeStyle, Graph, NodeId, Shape, SubgraphId};
+use crate::graph::{ArrowTip, Direction, EdgeStyle, Graph, Node, NodeId, Shape, SubgraphId};
+use crate::layout::{
+    inner_span, CONTAINER_PAD_BOTTOM, CONTAINER_PAD_TOP, CONTAINER_PAD_X, LR_LABEL_PAD,
+};
 use crate::style::{Color, Style};
 use std::collections::HashMap;
 
@@ -269,95 +272,80 @@ fn tip_char(tip: ArrowTip, axes: Axes) -> Option<char> {
     }
 }
 
-struct Canvas {
-    chars: Vec<Vec<char>>,
-    kinds: Vec<Vec<CellKind>>,
-    sides: Vec<Vec<u8>>,
-    cell_style: Vec<Vec<EdgeStyle>>,
+#[derive(Debug, Clone, Copy)]
+struct Cell {
+    ch: char,
+    kind: CellKind,
+    sides: u8,
+    style: EdgeStyle,
     // Per-cell style override: non-empty values win over the theme.
-    override_style: Vec<Vec<Style>>,
+    over: Style,
+}
+
+impl Default for Cell {
+    fn default() -> Self {
+        Self {
+            ch: ' ',
+            kind: CellKind::Empty,
+            sides: 0,
+            style: EdgeStyle::Normal,
+            over: Style::new(),
+        }
+    }
+}
+
+struct Canvas {
+    cells: Vec<Vec<Cell>>,
 }
 
 impl Canvas {
     fn new(w: usize, h: usize) -> Self {
         Self {
-            chars: vec![vec![' '; w]; h],
-            kinds: vec![vec![CellKind::Empty; w]; h],
-            sides: vec![vec![0u8; w]; h],
-            cell_style: vec![vec![EdgeStyle::Normal; w]; h],
-            override_style: vec![vec![Style::new(); w]; h],
+            cells: vec![vec![Cell::default(); w]; h],
         }
     }
 
     fn set_override(&mut self, x: usize, y: usize, style: Style) {
         if self.in_bounds(x, y) {
-            self.override_style[y][x] = style;
+            self.cells[y][x].over = style;
         }
     }
 
     /// Grow the canvas to at least `w × h`.
     fn ensure(&mut self, w: usize, h: usize) {
-        while self.chars.len() < h {
-            self.chars.push(vec![' '; w.max(self.width())]);
-            self.kinds.push(vec![CellKind::Empty; w.max(self.width())]);
-            self.sides.push(vec![0u8; w.max(self.width())]);
-            self.cell_style.push(vec![EdgeStyle::Normal; w.max(self.width())]);
-            self.override_style.push(vec![Style::new(); w.max(self.width())]);
+        let w = w.max(self.width());
+        for row in &mut self.cells {
+            row.resize(w, Cell::default());
         }
-        for row in &mut self.chars {
-            while row.len() < w {
-                row.push(' ');
-            }
-        }
-        for row in &mut self.kinds {
-            while row.len() < w {
-                row.push(CellKind::Empty);
-            }
-        }
-        for row in &mut self.sides {
-            while row.len() < w {
-                row.push(0);
-            }
-        }
-        for row in &mut self.cell_style {
-            while row.len() < w {
-                row.push(EdgeStyle::Normal);
-            }
-        }
-        for row in &mut self.override_style {
-            while row.len() < w {
-                row.push(Style::new());
-            }
+        while self.cells.len() < h {
+            self.cells.push(vec![Cell::default(); w]);
         }
     }
 
     fn width(&self) -> usize {
-        self.chars.first().map(|r| r.len()).unwrap_or(0)
+        self.cells.first().map_or(0, |r| r.len())
     }
 
     fn in_bounds(&self, x: usize, y: usize) -> bool {
-        y < self.chars.len() && x < self.chars[y].len()
+        y < self.cells.len() && x < self.cells[y].len()
     }
 
     // Direct write — for borders, labels, arrows (anything that isn't
     // line-art managed by the sides bitmask).
     fn set(&mut self, x: usize, y: usize, ch: char, kind: CellKind) {
         if self.in_bounds(x, y) {
-            self.chars[y][x] = ch;
-            self.kinds[y][x] = kind;
+            let c = &mut self.cells[y][x];
+            c.ch = ch;
+            c.kind = kind;
         }
     }
 
     /// Reverse row order and vertically mirror every directional glyph.
     fn flip_v(&mut self) {
-        self.chars.reverse();
-        self.kinds.reverse();
-        self.sides.reverse();
-        self.cell_style.reverse();
-        self.override_style.reverse();
-        for row in &mut self.chars {
+        self.cells.reverse();
+        for row in &mut self.cells {
             for c in row.iter_mut() {
-                *c = flip_glyph_v(*c);
+                c.ch = flip_glyph_v(c.ch);
             }
         }
     }
@@ -365,36 +353,25 @@ impl Canvas {
     /// Reverse column order within each row and horizontally mirror every
     /// directional glyph. Label runs are re-reversed so text reads forward.
     fn flip_h(&mut self) {
-        for row in &mut self.chars {
+        for row in &mut self.cells {
             row.reverse();
             for c in row.iter_mut() {
-                *c = flip_glyph_h(*c);
+                c.ch = flip_glyph_h(c.ch);
             }
-        }
-        for row in &mut self.kinds {
-            row.reverse();
-        }
-        for row in &mut self.sides {
-            row.reverse();
-        }
-        for row in &mut self.cell_style {
-            row.reverse();
-        }
-        for row in &mut self.override_style {
-            row.reverse();
-        }
-        // Re-reverse any contiguous run of Label cells so text reads L→R.
-        for (chars, kinds) in self.chars.iter_mut().zip(self.kinds.iter()) {
+            // Re-reverse any contiguous run of Label cells so text reads L→R.
             let mut i = 0;
-            while i < kinds.len() {
-                if kinds[i] == CellKind::Label {
-                    let start = i;
-                    while i < kinds.len() && kinds[i] == CellKind::Label {
-                        i += 1;
-                    }
-                    chars[start..i].reverse();
-                } else {
+            while i < row.len() {
+                if row[i].kind != CellKind::Label {
                     i += 1;
+                    continue;
+                }
+                let start = i;
+                while i < row.len() && row[i].kind == CellKind::Label {
+                    i += 1;
+                }
+                let text: Vec<char> = row[start..i].iter().map(|c| c.ch).collect();
+                for (k, ch) in text.into_iter().rev().enumerate() {
+                    row[start + k].ch = ch;
                 }
             }
         }
@@ -407,23 +384,20 @@ impl Canvas {
         if !self.in_bounds(x, y) || new == 0 {
             return;
         }
-        let old = self.sides[y][x];
+        let c = &mut self.cells[y][x];
         // Crossing: a plain vertical meeting a plain horizontal.
-        if (old == (UP | DOWN) && new == (LEFT | RIGHT))
-            || (old == (LEFT | RIGHT) && new == (UP | DOWN))
+        if (c.sides == (UP | DOWN) && new == (LEFT | RIGHT))
+            || (c.sides == (LEFT | RIGHT) && new == (UP | DOWN))
         {
-            self.chars[y][x] = '╳';
-            self.kinds[y][x] = CellKind::Crossing;
+            c.ch = '╳';
+            c.kind = CellKind::Crossing;
             // Don't OR into sides — subsequent ops will treat it as empty.
             return;
         }
-        let combined = old | new;
-        self.sides[y][x] = combined;
-        let cur_style = self.cell_style[y][x];
-        let merged_style = style.max_over(cur_style);
-        self.cell_style[y][x] = merged_style;
-        self.chars[y][x] = lineart(combined, merged_style);
-        self.kinds[y][x] = kind;
+        c.sides |= new;
+        c.style = style.max_over(c.style);
+        c.ch = lineart(c.sides, c.style);
+        c.kind = kind;
     }
 }
 
@@ -574,12 +548,6 @@ pub fn render(g: &Graph, theme: &Theme) -> String {
 }
 
 fn draw_subgraph_containers(canvas: &mut Canvas, g: &Graph) {
-    // Pad around contained nodes — more vertical than horizontal since the
-    // title bar lives on top.
-    const PAD_X: usize = 2;
-    const PAD_TOP: usize = 2;
-    const PAD_BOTTOM: usize = 1;
-
     // Order by nesting depth (outer first, inner last) so inner borders end
     // up visible above outer ones.
     let mut ordered: Vec<usize> = (0..g.subgraphs.len()).collect();
@@ -604,10 +572,10 @@ fn draw_subgraph_containers(canvas: &mut Canvas, g: &Graph) {
         if !any {
             continue;
         }
-        let left = min_x.saturating_sub(PAD_X);
-        let right = max_x + PAD_X;
-        let top = min_y.saturating_sub(PAD_TOP);
-        let bottom = max_y + PAD_BOTTOM;
+        let left = min_x.saturating_sub(CONTAINER_PAD_X);
+        let right = max_x + CONTAINER_PAD_X;
+        let top = min_y.saturating_sub(CONTAINER_PAD_TOP);
+        let bottom = max_y + CONTAINER_PAD_BOTTOM;
 
         // Expand canvas if the container ran past its current bounds.
         canvas.ensure(right + 1, bottom + 1);
@@ -616,8 +584,8 @@ fn draw_subgraph_containers(canvas: &mut Canvas, g: &Graph) {
         // Draw container cells, but never overwrite an adjacent node's box
         // border. Edges and empty cells are fair game.
         let mut put = |cx: usize, cy: usize, ch: char| {
-            let kind = canvas.kinds.get(cy).and_then(|r| r.get(cx)).copied();
-            if !matches!(kind, Some(CellKind::Border)) {
+            let kind = canvas.cells.get(cy).and_then(|r| r.get(cx)).map(|c| c.kind);
+            if kind != Some(CellKind::Border) {
                 canvas.set(cx, cy, ch, CellKind::Border);
             }
         };
@@ -635,11 +603,7 @@ fn draw_subgraph_containers(canvas: &mut Canvas, g: &Graph) {
         put(right, bottom, '┘');
 
         // Title: "── Label ──" on the top border, left-anchored.
-        let label = if !sg.label.is_empty() {
-            sg.label.as_str()
-        } else {
-            sg.name.as_str()
-        };
+        let label = sg.title();
         if !label.is_empty() {
             let title_len = label.chars().count();
             let inner = (right - left).saturating_sub(2);
@@ -680,7 +644,7 @@ fn depth(g: &Graph, sid: SubgraphId) -> usize {
 fn place_edge_label_td(canvas: &mut Canvas, sx: usize, sy: usize, text: &str) {
     // Center label on the edge column, replacing the `│` on that row.
     let row = sy + 1;
-    if row >= canvas.chars.len() {
+    if row >= canvas.cells.len() {
         return;
     }
     let len = text.chars().count();
@@ -688,12 +652,11 @@ fn place_edge_label_td(canvas: &mut Canvas, sx: usize, sy: usize, text: &str) {
         return;
     }
     let start = sx.saturating_sub(len / 2);
-    let width = canvas.chars[row].len();
-    if start + len > width {
+    if start + len > canvas.cells[row].len() {
         return;
     }
     for k in 0..len {
-        let c = canvas.chars[row][start + k];
+        let c = canvas.cells[row][start + k].ch;
         if c != ' ' && c != '│' {
             return;
         }
@@ -706,19 +669,12 @@ fn place_edge_label_td(canvas: &mut Canvas, sx: usize, sy: usize, text: &str) {
 fn emit(canvas: &Canvas, theme: &Theme) -> String {
     let apply_overrides = !theme.is_plain();
     let mut out = String::new();
-    for ((row_chars, row_kinds), row_override) in canvas
-        .chars
-        .iter()
-        .zip(canvas.kinds.iter())
-        .zip(canvas.override_style.iter())
-    {
+    for row in &canvas.cells {
         // Row length for trimming: include any cell with non-space char OR a
         // non-empty override (background colors matter even for space cells).
-        let end = (0..row_chars.len())
-            .rev()
-            .find(|&i| {
-                row_chars[i] != ' ' || (apply_overrides && !row_override[i].is_empty())
-            })
+        let end = row
+            .iter()
+            .rposition(|c| c.ch != ' ' || (apply_overrides && !c.over.is_empty()))
             .map(|i| i + 1)
             .unwrap_or(0);
         if end == 0 {
@@ -726,12 +682,10 @@ fn emit(canvas: &Canvas, theme: &Theme) -> String {
             continue;
         }
         let mut current = Style::new();
-        for i in 0..end {
-            let ch = row_chars[i];
-            let kind = row_kinds[i];
-            let base = theme.style_for(kind);
+        for cell in &row[..end] {
+            let base = theme.style_for(cell.kind);
             let want = if apply_overrides {
-                combine_style(base, row_override[i], kind)
+                combine_style(base, cell.over, cell.kind)
             } else {
                 base
             };
@@ -742,7 +696,7 @@ fn emit(canvas: &Canvas, theme: &Theme) -> String {
                 want.write(&mut out);
                 current = want;
             }
-            out.push(ch);
+            out.push(cell.ch);
         }
         if !current.is_empty() {
             out.push_str(RESET);
@@ -806,45 +760,21 @@ fn draw_box(
 }
 
 // Minor-axis inner range (TD: x, LR: y).
-fn inner_range(n: &crate::graph::Node, dir: InnerDir) -> (usize, usize) {
-    if n.is_dummy {
-        match dir {
-            InnerDir::TD => (n.x, n.x),
-            InnerDir::LR => (n.y, n.y),
-        }
-    } else {
-        match dir {
-            InnerDir::TD => {
-                if n.width >= 3 {
-                    (n.x + 1, n.x + n.width - 2)
-                } else {
-                    (n.x, n.x + n.width.saturating_sub(1))
-                }
-            }
-            InnerDir::LR => {
-                if n.height >= 3 {
-                    (n.y + 1, n.y + n.height - 2)
-                } else {
-                    (n.y, n.y + n.height.saturating_sub(1))
-                }
-            }
-        }
+fn inner_range(n: &Node, dir: InnerDir) -> (usize, usize) {
+    match dir {
+        InnerDir::TD => inner_span(n.x, n.width, n.is_dummy),
+        InnerDir::LR => inner_span(n.y, n.height, n.is_dummy),
     }
 }
 
-fn minor_center(n: &crate::graph::Node, dir: InnerDir) -> usize {
+fn minor_center(n: &Node, dir: InnerDir) -> usize {
     match dir {
         InnerDir::TD => n.x + n.width / 2,
         InnerDir::LR => n.y + n.height / 2,
     }
 }
 
-fn preferred_endpoints(
-    src: &crate::graph::Node,
-    dst: &crate::graph::Node,
-    dir: InnerDir,
-    single: bool,
-) -> (usize, usize) {
+fn preferred_endpoints(src: &Node, dst: &Node, dir: InnerDir, single: bool) -> (usize, usize) {
     let (slo, shi) = inner_range(src, dir);
     let (dlo, dhi) = inner_range(dst, dir);
     // Prefer dst's own center — it's the "natural" attach point and, for
@@ -1119,27 +1049,26 @@ fn draw_merge(
 
 fn place_edge_label_lr(canvas: &mut Canvas, sx: usize, sy: usize, text: &str) {
     // Centered on the horizontal drop, leaving LR_LABEL_PAD `─` chars each side.
-    if sy >= canvas.chars.len() {
+    if sy >= canvas.cells.len() {
         return;
     }
-    let row = &canvas.chars[sy];
+    let row = &canvas.cells[sy];
     let len = text.chars().count();
     if len == 0 {
         return;
     }
     let mut run_end = sx;
-    while run_end < row.len() && matches!(row[run_end], '─' | '━' | '┄' | ' ') {
+    while run_end < row.len() && matches!(row[run_end].ch, '─' | '━' | '┄' | ' ') {
         run_end += 1;
     }
     let run_len = run_end - sx;
-    let pad = crate::layout::LR_LABEL_PAD;
-    if run_len < len + 2 * pad {
+    if run_len < len + 2 * LR_LABEL_PAD {
         return;
     }
-    let extra = run_len - len - 2 * pad;
-    let start = sx + pad + extra / 2;
+    let extra = run_len - len - 2 * LR_LABEL_PAD;
+    let start = sx + LR_LABEL_PAD + extra / 2;
     for k in 0..len {
-        let c = row[start + k];
+        let c = row[start + k].ch;
         if c != ' ' && c != '─' && c != '━' && c != '┄' {
             return;
         }

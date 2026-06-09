@@ -1,18 +1,26 @@
-use crate::graph::{
-    ArrowTip, Direction, Edge, EdgeStyle, Graph, Node, NodeId, Shape, SubgraphId,
-};
-use crate::style::Style;
+use crate::graph::{ArrowTip, Direction, Edge, EdgeStyle, Graph, NodeId, SubgraphId};
 use std::collections::HashMap;
 
 // LR-only: horizontal `─` padding on each side of an inline edge label.
 pub const LR_LABEL_PAD: usize = 2;
 
-// Inner padding of subgraph containers. Must match render::draw_subgraph_containers
-// so the reserved space we add here lines up with what the renderer actually
-// draws as the box border + breathing room.
-const CONTAINER_PAD_X: usize = 2;
-const CONTAINER_PAD_TOP: usize = 2;
-const CONTAINER_PAD_BOTTOM: usize = 1;
+// Inner padding of subgraph containers: reserved here, drawn by
+// render::draw_subgraph_containers.
+pub const CONTAINER_PAD_X: usize = 2;
+pub const CONTAINER_PAD_TOP: usize = 2;
+pub const CONTAINER_PAD_BOTTOM: usize = 1;
+
+/// Minor-axis span of a box border's usable attach cells (excludes the two
+/// corners), or the single cell of a dummy.
+pub fn inner_span(start: usize, len: usize, is_dummy: bool) -> (usize, usize) {
+    if is_dummy {
+        (start, start)
+    } else if len >= 3 {
+        (start + 1, start + len - 2)
+    } else {
+        (start, start + len.saturating_sub(1))
+    }
+}
 
 // Within-layer packing gap. Horizontal in TD/BT (4 cols feels comfortable),
 // vertical in LR/RL (3 rows lines up with standard 3-row node heights so
@@ -101,7 +109,7 @@ struct SliceEdge {
     orig_g_edge: Option<usize>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct Scope {
     items: Vec<Item>,
     edges: Vec<SliceEdge>,
@@ -114,19 +122,6 @@ struct Scope {
 }
 
 impl Scope {
-    fn new() -> Self {
-        Self {
-            items: Vec::new(),
-            edges: Vec::new(),
-            widths: Vec::new(),
-            heights: Vec::new(),
-            layers: Vec::new(),
-            orders: Vec::new(),
-            xs: Vec::new(),
-            ys: Vec::new(),
-        }
-    }
-
     fn push(&mut self, item: Item, w: usize, h: usize) -> usize {
         let id = self.items.len();
         self.items.push(item);
@@ -153,7 +148,7 @@ fn layout_level(
     context: Option<SubgraphId>,
     sub_info: &HashMap<SubgraphId, LevelResult>,
 ) -> LevelResult {
-    let mut scope = Scope::new();
+    let mut scope = Scope::default();
     let mut item_of_node: HashMap<NodeId, usize> = HashMap::new();
     let mut item_of_meta: HashMap<SubgraphId, usize> = HashMap::new();
 
@@ -184,13 +179,8 @@ fn layout_level(
         let Some(child) = sub_info.get(&sid) else {
             continue;
         };
-        let title = if !g.subgraphs[sid].label.is_empty() {
-            &g.subgraphs[sid].label
-        } else {
-            &g.subgraphs[sid].name
-        };
         // Minimum extent to fit "─ title ─" on the top border.
-        let min_title = title.chars().count() + 4;
+        let min_title = g.subgraphs[sid].title().chars().count() + 4;
         let base_w = child.w + 2 * CONTAINER_PAD_X;
         let base_h = (child.h + CONTAINER_PAD_TOP + CONTAINER_PAD_BOTTOM).max(3);
         let (meta_w, meta_h) = if horizontal_output {
@@ -718,15 +708,7 @@ fn channel_is_tight_scope(scope: &Scope, l: usize) -> bool {
 }
 
 fn item_inner_range_scope(scope: &Scope, id: usize) -> (usize, usize) {
-    let x = scope.xs[id];
-    let w = scope.widths[id];
-    if scope.is_dummy(id) {
-        (x, x)
-    } else if w >= 3 {
-        (x + 1, x + w - 2)
-    } else {
-        (x, x + w.saturating_sub(1))
-    }
+    inner_span(scope.xs[id], scope.widths[id], scope.is_dummy(id))
 }
 
 fn assign_y_scope(scope: &mut Scope, dir: Direction) {
@@ -800,21 +782,7 @@ fn materialize_dummies(
     let mut map: HashMap<usize, NodeId> = HashMap::new();
     for i in 0..scope.len() {
         if let Item::Dummy = scope.items[i] {
-            let nid = g.nodes.len();
-            g.nodes.push(Node {
-                id: nid,
-                name: format!("__dummy_{}", nid),
-                label_lines: vec![],
-                is_dummy: true,
-                shape: Shape::Round,
-                width: 1,
-                height: 1,
-                x: 0,
-                y: 0,
-                style: Style::new(),
-                subgraph: context,
-            });
-            map.insert(i, nid);
+            map.insert(i, g.add_dummy(context));
         }
     }
     map

@@ -1,5 +1,5 @@
 use crate::graph::{
-    ArrowTip, Direction, EdgeStyle, Graph, NodeId, Shape, Subgraph, SubgraphId,
+    ArrowTip, Direction, Edge, EdgeStyle, Graph, NodeId, Shape, Subgraph, SubgraphId,
 };
 use crate::style::{Color, Style};
 use std::collections::HashMap;
@@ -18,12 +18,55 @@ struct EdgeHit {
     length: usize,
 }
 
+impl EdgeHit {
+    fn new(start: usize, end: usize, style: EdgeStyle, tip_fwd: ArrowTip, length: usize) -> Self {
+        Self {
+            start,
+            end,
+            style,
+            label: None,
+            tip_fwd,
+            tip_back: false,
+            length,
+        }
+    }
+}
+
 // Labeled forms. Opener requires trailing space; closer requires leading space.
 const LABELED_OPS: &[(&str, &str, EdgeStyle)] = &[
     ("-- ", " -->", EdgeStyle::Normal),
     ("== ", " ==>", EdgeStyle::Thick),
     ("-. ", " .->", EdgeStyle::Dotted),
 ];
+
+// Scan a run of `line_ch` at `pos`: tipped (`-->`, `--x`, `--o`, `==>`) or
+// open (`---`, `===`). Extra run chars raise the edge rank (`--->` = 2, …).
+// Cross/circle tips only exist for dash runs.
+fn run_hit(bytes: &[u8], pos: usize, line_ch: u8, style: EdgeStyle) -> Option<EdgeHit> {
+    if bytes[pos] != line_ch {
+        return None;
+    }
+    let mut end = pos;
+    while end < bytes.len() && bytes[end] == line_ch {
+        end += 1;
+    }
+    let count = end - pos;
+    if count >= 2 && end < bytes.len() {
+        let tip = match bytes[end] {
+            b'>' => Some(ArrowTip::Arrow),
+            b'x' if line_ch == b'-' => Some(ArrowTip::Cross),
+            b'o' if line_ch == b'-' => Some(ArrowTip::Circle),
+            _ => None,
+        };
+        if let Some(tip_fwd) = tip {
+            return Some(EdgeHit::new(pos, end + 1, style, tip_fwd, count - 1));
+        }
+    }
+    if count >= 3 {
+        return Some(EdgeHit::new(pos, end, style, ArrowTip::None, count - 2));
+    }
+    None
+}
 
 // Scan a single simple edge token starting at `pos` and return its span
 // plus the style + tip. Handles long forms (`-->`, `--->`, `---->`, `---`,
@@ -36,15 +79,7 @@ fn try_simple_at(s: &str, pos: usize) -> Option<EdgeHit> {
 
     // Dotted: -.-> (exactly four chars, handle before dash run)
     if s[pos..].starts_with("-.->") {
-        return Some(EdgeHit {
-            start: pos,
-            end: pos + 4,
-            style: EdgeStyle::Dotted,
-            label: None,
-            tip_fwd: ArrowTip::Arrow,
-            tip_back: false,
-            length: 1,
-        });
+        return Some(EdgeHit::new(pos, pos + 4, EdgeStyle::Dotted, ArrowTip::Arrow, 1));
     }
 
     // Bidirectional: `<-->` (or longer). Leading `<`, then a dash run, then `>`.
@@ -56,103 +91,19 @@ fn try_simple_at(s: &str, pos: usize) -> Option<EdgeHit> {
         let dashes = end - pos - 1;
         if dashes >= 2 && end < bytes.len() && bytes[end] == b'>' {
             return Some(EdgeHit {
-                start: pos,
-                end: end + 1,
-                style: EdgeStyle::Normal,
-                label: None,
-                tip_fwd: ArrowTip::Arrow,
                 tip_back: true,
-                length: (dashes - 1).max(1),
-            });
-        }
-    }
-
-    // Dash run: `---`, `-->`, `--->`, `--x`, `--o`, ...
-    if bytes[pos] == b'-' {
-        let mut end = pos;
-        while end < bytes.len() && bytes[end] == b'-' {
-            end += 1;
-        }
-        let dash_count = end - pos;
-        if dash_count >= 2 && end < bytes.len() {
-            let tip = match bytes[end] {
-                b'>' => Some(ArrowTip::Arrow),
-                b'x' => Some(ArrowTip::Cross),
-                b'o' => Some(ArrowTip::Circle),
-                _ => None,
-            };
-            if let Some(tip_fwd) = tip {
-                return Some(EdgeHit {
-                    start: pos,
-                    end: end + 1,
-                    style: EdgeStyle::Normal,
-                    label: None,
-                    tip_fwd,
-                    tip_back: false,
-                    // 2 dashes = base length 1, 3 dashes = 2, …
-                    length: (dash_count - 1).max(1),
-                });
-            }
-        }
-        if dash_count >= 3 {
-            return Some(EdgeHit {
-                start: pos,
-                end,
-                style: EdgeStyle::Normal,
-                label: None,
-                tip_fwd: ArrowTip::None,
-                tip_back: false,
-                // 3 dashes = base open, 4 = longer, …
-                length: (dash_count - 2).max(1),
-            });
-        }
-    }
-
-    // Equals run: `==>`, `===`
-    if bytes[pos] == b'=' {
-        let mut end = pos;
-        while end < bytes.len() && bytes[end] == b'=' {
-            end += 1;
-        }
-        let eq_count = end - pos;
-        if eq_count >= 2 && end < bytes.len() && bytes[end] == b'>' {
-            return Some(EdgeHit {
-                start: pos,
-                end: end + 1,
-                style: EdgeStyle::Thick,
-                label: None,
-                tip_fwd: ArrowTip::Arrow,
-                tip_back: false,
-                length: (eq_count - 1).max(1),
-            });
-        }
-        if eq_count >= 3 {
-            return Some(EdgeHit {
-                start: pos,
-                end,
-                style: EdgeStyle::Thick,
-                label: None,
-                tip_fwd: ArrowTip::None,
-                tip_back: false,
-                length: (eq_count - 2).max(1),
+                ..EdgeHit::new(pos, end + 1, EdgeStyle::Normal, ArrowTip::Arrow, dashes - 1)
             });
         }
     }
 
     // Invisible: ~~~
     if s[pos..].starts_with("~~~") {
-        return Some(EdgeHit {
-            start: pos,
-            end: pos + 3,
-            style: EdgeStyle::Invisible,
-            label: None,
-            length: 1,
-            tip_fwd: ArrowTip::None,
-            tip_back: false,
-        });
+        return Some(EdgeHit::new(pos, pos + 3, EdgeStyle::Invisible, ArrowTip::None, 1));
     }
 
-    None
+    run_hit(bytes, pos, b'-', EdgeStyle::Normal)
+        .or_else(|| run_hit(bytes, pos, b'=', EdgeStyle::Thick))
 }
 
 fn find_edge_op(s: &str, from: usize) -> Option<EdgeHit> {
@@ -204,7 +155,7 @@ fn find_edge_op(s: &str, from: usize) -> Option<EdgeHit> {
 }
 
 pub fn parse(source: &str) -> Result<Graph, String> {
-    let mut g = Graph::new();
+    let mut g = Graph::default();
     let mut sg_stack: Vec<SubgraphId> = Vec::new();
     // Deferred directives that need to resolve node names (which might not
     // exist yet at the time of parsing), applied after a full first pass.
@@ -362,8 +313,6 @@ fn merge_style(mut base: Style, over: Style) -> Style {
     if over.fg.is_some() {
         base.fg = over.fg;
     }
-    base.bold |= over.bold;
-    base.italic |= over.italic;
     base.dim |= over.dim;
     base
 }
@@ -459,19 +408,17 @@ fn parse_edge_line(g: &mut Graph, line: &str, sg: Option<SubgraphId>) -> Result<
     for i in 1..groups.len() {
         let hit = &hits[i - 1];
         let edge_label = pipe_labels[i].clone().or_else(|| hit.label.clone());
-        let left = groups[i - 1].clone();
-        let right = groups[i].clone();
-        for &from in &left {
-            for &to in &right {
-                g.add_edge(
+        for &from in &groups[i - 1] {
+            for &to in &groups[i] {
+                g.edges.push(Edge {
                     from,
                     to,
-                    edge_label.clone(),
-                    hit.style,
-                    hit.tip_fwd,
-                    hit.tip_back,
-                    hit.length,
-                );
+                    label: edge_label.clone(),
+                    style: hit.style,
+                    tip_fwd: hit.tip_fwd,
+                    tip_back: hit.tip_back,
+                    length: hit.length,
+                });
             }
         }
     }
@@ -533,29 +480,22 @@ fn clean_label(s: &str) -> String {
 
 /// Split a label string on `<br>` / `<br/>` / `<br />` into rendered lines.
 pub fn split_br(label: &str) -> Vec<String> {
+    // ASCII lowercasing keeps byte offsets aligned with `label`.
+    let lower = label.to_ascii_lowercase();
     let mut out = Vec::new();
-    let mut rest = label;
-    loop {
-        // Case-insensitive search for the first `<br`
-        let idx = rest
-            .char_indices()
-            .find(|&(i, _)| rest[i..].to_ascii_lowercase().starts_with("<br"));
-        let Some((i, _)) = idx else {
-            out.push(rest.trim().to_string());
-            break;
-        };
-        out.push(rest[..i].trim().to_string());
-        // Find the closing `>`.
-        let after = &rest[i..];
-        let Some(close) = after.find('>') else {
-            // Malformed — take the rest verbatim.
-            out.push(after.trim().to_string());
-            break;
-        };
-        rest = &after[close + 1..];
+    let mut pos = 0;
+    while let Some(rel) = lower[pos..].find("<br") {
+        let i = pos + rel;
+        out.push(label[pos..i].trim().to_string());
+        match lower[i..].find('>') {
+            Some(close) => pos = i + close + 1,
+            None => {
+                // Malformed — take the rest verbatim.
+                out.push(label[i..].trim().to_string());
+                return out;
+            }
+        }
     }
-    if out.is_empty() {
-        out.push(String::new());
-    }
+    out.push(label[pos..].trim().to_string());
     out
 }
